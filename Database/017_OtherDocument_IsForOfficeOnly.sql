@@ -85,7 +85,7 @@ BEGIN
     INSERT @rows
     SELECT i.OtherDocumentMasterID,
            CASE WHEN i.IsForOfficeOnly = 1 THEN -2 ELSE i.VesselID END,
-           CASE WHEN ISNULL(t.IsCertificate, 0) = 1 THEN ''Certificate'' ELSE ''Document'' END,
+           ''Document'',
            LEFT(LTRIM(ISNULL(i.DocumentNumber, '''') + '' '' + ISNULL(i.DocumentTitle, '''')), 500)
       FROM inserted i
       LEFT JOIN dbo.OtherDocument_Type t ON t.OtherDocument_TypeID = i.OtherDocument_TypeID

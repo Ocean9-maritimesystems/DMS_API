@@ -15,7 +15,6 @@ namespace DMS.Infrastructure.Services;
 ///   ack-office           office users who have not acknowledged yet
 ///   ack-completed        acknowledgements received (DM_Manual_UserAck, CIR_UserAck)
 ///   circular-register    circulars and alerts with status, dates and acknowledgement progress
-///   certificate-expiry   certificates with expiry status (Expired / Expiring / Valid / No expiry)
 ///   document-register    other documents per vessel, where they came from and their files
 ///   manual-register      manuals with category, status and current version
 ///   vessel-sync          last contact / sync of every vessel (dbo.Sync_Vessel)
@@ -38,7 +37,7 @@ public sealed class ReportService : IReportService
 
     public static readonly string[] Keys =
     {
-        "ack-pending", "ack-vessel-summary", "ack-office", "ack-completed", "circular-register", "certificate-expiry",
+        "ack-pending", "ack-vessel-summary", "ack-office", "ack-completed", "circular-register",
         "document-register", "manual-register", "vessel-sync", "sync-log", "suggestions",
     };
 
@@ -62,7 +61,6 @@ public sealed class ReportService : IReportService
         "ack-office" => AckOfficeAsync(f),
         "ack-completed" => AckCompletedAsync(f),
         "circular-register" => CircularRegisterAsync(f),
-        "certificate-expiry" => CertificateExpiryAsync(f),
         "document-register" => DocumentRegisterAsync(f),
         "manual-register" => ManualRegisterAsync(f),
         "vessel-sync" => VesselSyncAsync(f),
@@ -166,11 +164,7 @@ public sealed class ReportService : IReportService
         return rows;
     }
 
-    // ------------------------------------------------------------------------------------------------ certificates and documents
-
-    private Task<List<Dictionary<string, object?>>> CertificateExpiryAsync(ReportFilter f)
-        => _db.ProcRowsAsync("dbo.Rpt_CertificateExpiry",
-            ("@Max", MaxRows), ("@VesselID", f.VesselId), ("@Days", f.Days), ("@Status", Text(f.Status)));
+    // ------------------------------------------------------------------------------------------------ documents
 
     private Task<List<Dictionary<string, object?>>> DocumentRegisterAsync(ReportFilter f)
     {

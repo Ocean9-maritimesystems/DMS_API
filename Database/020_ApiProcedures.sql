@@ -33,8 +33,8 @@ GO
 
 /* ------------------------------------------------------------------------------------ Search ---- */
 
-/* One search over manuals (number, name, text of the latest version), circulars and alerts, other documents and
-   certificates, and suggestions (api/Search). @Types: comma-separated Manual,Circular,Document,Suggestion.
+/* One search over manuals (number, name, text of the latest version), circulars and alerts, other documents
+   and suggestions (api/Search). @Types: comma-separated Manual,Circular,Document,Suggestion.
    @W0..@W5: LIKE patterns with \ as the escape character, NULL when unused; every pattern given must match.
    @First: the first word, to centre the manual text snippet on it. Up to @PerType hits per type. */
 CREATE OR ALTER PROCEDURE dbo.Api_Search
@@ -85,13 +85,13 @@ BEGIN
     IF @t LIKE '%,Document,%'
         INSERT @hits
         SELECT TOP (@PerType) 3, ROW_NUMBER() OVER (ORDER BY COALESCE(d.UploadedOn, d.CreatedDate) DESC),
-               CASE WHEN t.IsCertificate = 1 THEN 'Certificate' ELSE 'Document' END, d.OtherDocumentMasterID,
+               'Document', d.OtherDocumentMasterID,
                d.DocumentNumber, d.DocumentTitle, LEFT(ISNULL(t.DocumentType + ': ', '') + ISNULL(d.Comments, ''), 400),
                d.VesselID, COALESCE(d.UploadedOn, d.CreatedDate)
           FROM dbo.OtherDocumentMaster d
           LEFT JOIN dbo.OtherDocument_Type t ON t.OtherDocument_TypeID = d.OtherDocument_TypeID
          CROSS APPLY (SELECT d.DocumentNumber + ' ' + d.DocumentTitle + ' ' + ISNULL(d.Reference, '') + ' ' + ISNULL(d.Comments, '') + ' '
-                             + ISNULL(d.CertificateNo, '') + ' ' + ISNULL(d.IssuedBy, '') + ' ' + ISNULL(t.DocumentType, '') AS Hay) h
+                             + ISNULL(t.DocumentType, '') AS Hay) h
          WHERE ISNULL(d.IsDeleted, 0) <> 1
            AND h.Hay LIKE @W0 ESCAPE '\' AND (@W1 IS NULL OR h.Hay LIKE @W1 ESCAPE '\') AND (@W2 IS NULL OR h.Hay LIKE @W2 ESCAPE '\')
            AND (@W3 IS NULL OR h.Hay LIKE @W3 ESCAPE '\') AND (@W4 IS NULL OR h.Hay LIKE @W4 ESCAPE '\') AND (@W5 IS NULL OR h.Hay LIKE @W5 ESCAPE '\')
@@ -182,35 +182,8 @@ BEGIN
 END
 GO
 
-/* certificate-expiry: current certificates (not replaced by a newer one) with Expired / Expiring / Valid / No expiry.
-   @Days: only those expiring within that many days. */
-CREATE OR ALTER PROCEDURE dbo.Rpt_CertificateExpiry
-    @Max int = 20000, @VesselID int = NULL, @Days int = NULL, @Status varchar(20) = NULL
-AS
-BEGIN
-    SET NOCOUNT ON;
-    DECLARE @today date = CAST(GETDATE() AS date);
-    SELECT TOP (@Max) x.* FROM (
-        SELECT CASE WHEN m.VesselID > 0 THEN v.VslName WHEN m.VesselID = -1 THEN 'All vessels' ELSE 'Office' END AS vessel,
-               t.DocumentType AS type, m.CertificateNo AS certificateNo, m.DocumentNumber AS documentNo, m.DocumentTitle AS title,
-               m.IssuedBy AS issuedBy, m.IssueDate AS issueDate, m.ExpiryDate AS expiryDate, m.NextSurveyDate AS nextSurvey,
-               DATEDIFF(day, @today, m.ExpiryDate) AS daysLeft,
-               CASE WHEN m.ExpiryDate IS NULL THEN 'No expiry'
-                    WHEN m.ExpiryDate < @today THEN 'Expired'
-                    WHEN m.ExpiryDate <= DATEADD(day, ISNULL(t.WarningDays, 30), @today) THEN 'Expiring'
-                    ELSE 'Valid' END AS status
-          FROM dbo.OtherDocumentMaster m
-          JOIN dbo.OtherDocument_Type t ON t.OtherDocument_TypeID = m.OtherDocument_TypeID
-          LEFT JOIN dbo.V_Vessel v ON v.VesselID = m.VesselID
-         WHERE ISNULL(m.IsDeleted, 0) <> 1 AND ISNULL(t.IsCertificate, 0) = 1
-           -- a certificate that a newer one replaces is history, not a current certificate
-           AND NOT EXISTS (SELECT 1 FROM dbo.OtherDocumentMaster n WHERE n.ReplacesID = m.OtherDocumentMasterID AND ISNULL(n.IsDeleted, 0) <> 1)
-           AND (@VesselID IS NULL OR m.VesselID = @VesselID)
-           AND (@Days IS NULL OR m.ExpiryDate <= DATEADD(day, @Days, @today))
-    ) x
-     WHERE (@Status IS NULL OR x.status = @Status)
-     ORDER BY CASE WHEN x.expiryDate IS NULL THEN 1 ELSE 0 END, x.expiryDate, x.vessel;
-END
+/* certificate-expiry was removed with the certificates (023_RemoveCertificates.sql). */
+IF OBJECT_ID('dbo.Rpt_CertificateExpiry', 'P') IS NOT NULL DROP PROCEDURE dbo.Rpt_CertificateExpiry;
 GO
 
 /* document-register: other documents per vessel, where they came from (@Status = the source) and their files. */

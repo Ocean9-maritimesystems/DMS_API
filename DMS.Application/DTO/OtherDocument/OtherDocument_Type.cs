@@ -24,10 +24,5 @@ public partial class OtherDocument_Type
 
     public int? IsActive { get; set; }
 
-    public int? IsCertificate { get; set; }
-
     public int SortOrder { get; set; }
-
-    /// <summary>Days before expiry a certificate shows as expiring (012_NewFeatures.sql).</summary>
-    public int WarningDays { get; set; } = 30;
 }

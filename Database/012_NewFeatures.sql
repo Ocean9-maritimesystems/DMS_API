@@ -215,7 +215,8 @@ CREATE TABLE dbo.SUG_Blob
     AddedOn       datetime       NULL
 );
 
-IF OBJECT_ID('dbo.FLD_Folder', 'U') IS NULL
+-- Renamed to dbo.OtherDocument_Folder (key OtherDocument_FolderID) by 022_RenameFolderTable.sql.
+IF OBJECT_ID('dbo.FLD_Folder', 'U') IS NULL AND OBJECT_ID('dbo.OtherDocument_Folder', 'U') IS NULL
 CREATE TABLE dbo.FLD_Folder
 (
     FLD_FolderID  bigint         NOT NULL CONSTRAINT PK_FLD_Folder PRIMARY KEY,
@@ -310,7 +311,7 @@ BEGIN
 END
 GO
 
-/* A document or certificate added (at the office, or received from a vessel). */
+/* A document added (at the office, or received from a vessel). */
 CREATE OR ALTER TRIGGER dbo.TR_OtherDocumentMaster_Inbox ON dbo.OtherDocumentMaster AFTER INSERT
 AS
 BEGIN
@@ -318,7 +319,7 @@ BEGIN
     DECLARE @rows TABLE (ID bigint, VesselID int, ItemType varchar(20), Title nvarchar(500));
     INSERT @rows
     SELECT i.OtherDocumentMasterID, i.VesselID,
-           CASE WHEN ISNULL(t.IsCertificate, 0) = 1 THEN 'Certificate' ELSE 'Document' END,
+           'Document',
            LEFT(LTRIM(ISNULL(i.DocumentNumber, '') + ' ' + ISNULL(i.DocumentTitle, '')), 500)
       FROM inserted i
       LEFT JOIN dbo.OtherDocument_Type t ON t.OtherDocument_TypeID = i.OtherDocument_TypeID
@@ -470,6 +471,9 @@ USING (VALUES
 ) AS s (TableName, SortOrder, BlobColumn, AllVessels)
 ON t.TableName = s.TableName
 WHEN NOT MATCHED THEN INSERT (TableName, SortOrder, BlobColumn, AllVessels) VALUES (s.TableName, s.SortOrder, s.BlobColumn, s.AllVessels);
+-- Run again after 022_RenameFolderTable.sql: the folders are synced as OtherDocument_Folder.
+IF OBJECT_ID('dbo.OtherDocument_Folder', 'U') IS NOT NULL
+    DELETE FROM dbo.Sync_Table WHERE TableName = 'FLD_Folder';
 GO
 EXEC dbo.Sync_CreateRowTriggers;
 GO
@@ -497,6 +501,10 @@ BEGIN
     END
     CLOSE c; DEALLOCATE c;
 END
+GO
+
+IF OBJECT_ID('dbo.OtherDocument_Folder', 'U') IS NOT NULL AND OBJECT_ID('dbo.TableID_Setup', 'U') IS NOT NULL
+    DELETE FROM dbo.TableID_Setup WHERE TableName = 'FLD_Folder';   -- renamed by 022_RenameFolderTable.sql
 GO
 
 PRINT 'New features are ready in the office database.';

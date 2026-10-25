@@ -9,8 +9,8 @@ namespace DMS.Infrastructure.Services;
 
 /// <summary>
 /// Feature 2: the new-items inbox at the office. dbo.DMS_Inbox is filled by the database triggers (Database/012, 017, 018)
-/// when a manual is published, a circular / alert is released or cancelled, a document or certificate is added,
-/// a certificate is expiring or a suggestion changes. dbo.DMS_InboxRead holds who has read which line.
+/// when a manual is published, a circular / alert is released or cancelled, a document is added
+/// or a suggestion changes. dbo.DMS_InboxRead holds who has read which line.
 ///
 /// An office user sees every active line except those meant for one other person (TargetUserID) or for a rank on
 /// board (TargetRank): e.g. the status of a suggestion going back to the crew member who raised it.

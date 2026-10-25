@@ -152,7 +152,7 @@ public class SyncController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>GET api/Sync/FeatureFile/{table}/{id}: a suggestion or folder file (SUG_Blob / FLD_Blob), downloaded when first opened on board.</summary>
+    /// <summary>GET api/Sync/FeatureFile/{table}/{id}: a suggestion file (SUG_Blob), downloaded when first opened on board.</summary>
     [HttpGet("FeatureFile/{table}/{id:long}")]
     public async Task<IActionResult> GetFeatureFile(string table, long id)
     {

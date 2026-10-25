@@ -346,15 +346,6 @@ public class OtherDocumentPushDto
     public string? UploadedBy { get; set; }
     public List<OtherDocumentPushFileDto> Files { get; set; } = new();
 
-    // Certificates (a type with IsCertificate = 1; Database/012_NewFeatures.sql). Empty for other documents.
-    public string? CertificateNo { get; set; }
-    public string? IssuedBy { get; set; }
-    public DateTime? IssueDate { get; set; }
-    public DateTime? ExpiryDate { get; set; }
-    public DateTime? NextSurveyDate { get; set; }
-    /// <summary>The certificate this one renews (an ID the office already holds).</summary>
-    public long? ReplacesID { get; set; }
-
     /// <summary>The folder the document was filed in on board (OtherDocument_Folder, same ID at the office).</summary>
     public long? OtherDocument_FolderID { get; set; }
 }

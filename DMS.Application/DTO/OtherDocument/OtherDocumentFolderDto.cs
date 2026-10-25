@@ -47,8 +47,6 @@ public class FolderItem
         public string? Origin { get; set; }
         public int FileCount { get; set; }
         public long? FirstFileID { get; set; }
-        public bool IsCertificate { get; set; }
-        public DateTime? ExpiryDate { get; set; }
     }
 
     /// <summary>

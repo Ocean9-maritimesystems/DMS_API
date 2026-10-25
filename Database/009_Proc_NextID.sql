@@ -2,17 +2,23 @@
    009_Proc_NextID.sql  -  one "next ID" procedure for every table, in the office (HQ) and ship (VSL) databases.
 
    Replaces the per-table procedures such as Proc_NextID_App_Images. Same rules:
-     - The new ID is MAX(primary key) + 1 for this origin, but never below the last number handed out
-       (TableID_Setup.LastNumber), so a number is not reused after its row is deleted.
-     - The first time a table is used, its numbering starts from the vessel's TableIDstart (V_Vessels).
+     - The new ID is the higher of MAX(primary key) for this origin / vessel and the last number handed out
+       (TableID_Setup.LastNumber), plus 1. So a number is never reused after its row is deleted, and a vessel's
+       numbers start from its own range.
      - @Incrementor reserves a block: IDs @NewTableID .. @NewTableID + @Incrementor - 1 are all yours.
 
-   HQ vs VSL:
-     - Origin 'HQ'  : no vessel check. MAX is taken over Origin = 'HQ' rows only, whatever their VesselID,
-                      and the counter is kept in TableID_Setup under VesselID = 0 (starts from 0).
-     - Origin 'VSL' : MAX is taken over Origin = 'VSL' rows of @VesselID only, and the counter is kept
-                      under that VesselID, starting from that vessel's TableIDstart.
+   The counter row in TableID_Setup (one per table, origin and vessel):
+     - Origin 'VSL' : the row with TableName, Origin = 'VSL' and VesselID = @VesselID is read. When there is none,
+                      it is inserted with LastNumber = that vessel's TableIDstart (V_Vessel), so the vessel's first ID is TableIDstart + 1. MAX is taken over the table's
+                      Origin = 'VSL' rows of @VesselID only.
+     - Origin 'HQ'  : the row with TableName, Origin = 'HQ' and VesselID = 0 (inserted with LastNumber 0 when
+                      there is none). MAX is taken over Origin = 'HQ' rows, whatever their VesselID.
      A table with no Origin or no VesselID column is simply not filtered on it.
+     If TableID_Setup has no Origin column yet (an older ship database), the row is found by VesselID alone.
+
+   Safety net: when the chosen number (or block) is already used by another row of the table - another origin
+   or vessel, or a TableIDstart that is missing or overlaps - numbering carries on after the highest ID in the
+   whole table instead.
 
    The primary key column is read from the table itself (single-column primary key), falling back to
    <TableName>ID. The table name is checked against the database, so it cannot be used to inject SQL.
@@ -23,9 +29,21 @@
                           @Incrementor = 1, @NewTableID = @id OUTPUT;
      SELECT @id;
 
-   Run on the office database and on each ship database. Needs TableID_Setup, and V_Vessels (or V_Vessel)
-   with a TableIDstart column for the VSL start numbers (without it, numbering starts from 0).
+   Run on the office database and on each ship database (011_Vsl_CreateVesselDatabase.sql copies it to a new
+   ship database). Needs TableID_Setup, and V_Vessel with a TableIDstart column for the VSL start
+   numbers (without it, a vessel's numbering starts from 0).
    ===================================================================================================== */
+
+/* TableID_Setup.Origin: which origin a counter row belongs to ('HQ' or 'VSL'). Added when missing; existing rows
+   get 'HQ' for VesselID 0 and 'VSL' for a vessel. Rows with VesselID -1 (the IsForVsl list of tables) stay NULL. */
+IF OBJECT_ID(N'dbo.TableID_Setup', N'U') IS NOT NULL AND COL_LENGTH(N'dbo.TableID_Setup', N'Origin') IS NULL
+    ALTER TABLE dbo.TableID_Setup ADD Origin varchar(3) NULL;
+GO
+IF COL_LENGTH(N'dbo.TableID_Setup', N'Origin') IS NOT NULL
+    EXEC sp_executesql N'UPDATE dbo.TableID_Setup
+                            SET Origin = CASE WHEN VesselID = 0 THEN ''HQ'' ELSE ''VSL'' END
+                          WHERE Origin IS NULL AND VesselID >= 0;';
+GO
 
 CREATE OR ALTER PROCEDURE dbo.Proc_NextID
 (
@@ -100,42 +118,52 @@ BEGIN
          N'@Origin varchar(3), @VesselID int, @Max bigint OUTPUT',
          @Origin = @Origin, @VesselID = @VesselID, @Max = @MaxNumFromTable OUTPUT;
 
-    ---- Last number handed out for that table (from TableID_Setup)
-    SET @LastNumFromTableID = ISNULL((SELECT LastNumber FROM dbo.TableID_Setup WITH (UPDLOCK, HOLDLOCK)
-                                       WHERE TableName = @TableName AND VesselID = @SetupVesselID), 0);
+    ---- The counter row in TableID_Setup: TableName + Origin + VesselID (VesselID 0 for HQ)
+    DECLARE @HasOrigin bit = CASE WHEN COL_LENGTH(N'dbo.TableID_Setup', N'Origin') IS NULL THEN 0 ELSE 1 END;
+    DECLARE @SetupWhere nvarchar(200) = N' WHERE TableName = @Table AND VesselID = @Vessel'
+                                       + CASE WHEN @HasOrigin = 1 THEN N' AND Origin = @Org' ELSE N'' END;
+    DECLARE @Found int = 0;
+
+    SET @Sql = N'SELECT @Found = COUNT(*), @Last = ISNULL(MAX(LastNumber), 0) FROM dbo.TableID_Setup WITH (UPDLOCK, HOLDLOCK)' + @SetupWhere + N';';
+    EXEC sp_executesql @Sql,
+         N'@Table varchar(50), @Vessel int, @Org varchar(3), @Found int OUTPUT, @Last bigint OUTPUT',
+         @Table = @TableName, @Vessel = @SetupVesselID, @Org = @Origin, @Found = @Found OUTPUT, @Last = @LastNumFromTableID OUTPUT;
 
     -------------------------------------------------------------------------------------------------------
-    IF @LastNumFromTableID = 0
+    IF @Found = 0
     BEGIN
-        -- First use: start from the vessel's TableIDstart (HQ starts from 0).
+        -- No counter yet: a vessel starts from its TableIDstart (V_Vessel on the ship); HQ from 0.
+        SET @LastNumFromTableID = 0;
         IF @IsHQ = 0
         BEGIN
-            IF COL_LENGTH('dbo.V_Vessels', 'TableIDstart') IS NOT NULL
-                EXEC sp_executesql N'SELECT @Start = ISNULL(TableIDstart, 0) FROM dbo.V_Vessels WHERE VesselID = @VesselID;',
-                     N'@VesselID int, @Start bigint OUTPUT', @VesselID = @VesselID, @Start = @LastNumFromTableID OUTPUT;
-            ELSE IF COL_LENGTH('dbo.V_Vessel', 'TableIDstart') IS NOT NULL
-                EXEC sp_executesql N'SELECT @Start = ISNULL(TableIDstart, 0) FROM dbo.V_Vessel WHERE VesselID = @VesselID;',
+           IF COL_LENGTH('dbo.V_Vessel', 'TableIDstart') IS NOT NULL
+                EXEC sp_executesql N'SELECT @Start = ISNULL(MAX(TableIDstart), 0) FROM dbo.V_Vessel WHERE VesselID = @VesselID;',
                      N'@VesselID int, @Start bigint OUTPUT', @VesselID = @VesselID, @Start = @LastNumFromTableID OUTPUT;
         END;
         SET @LastNumFromTableID = ISNULL(@LastNumFromTableID, 0);
 
         SET @TableID_SetupID = (SELECT ISNULL(MAX(TableID_SetupID), 0) FROM dbo.TableID_Setup WITH (UPDLOCK, HOLDLOCK)) + 1;
+        -- (an older row for the same table and vessel without the origin would break the unique index)
         DELETE FROM dbo.TableID_Setup WHERE TableName = @TableName AND VesselID = @SetupVesselID;
-        IF COL_LENGTH('dbo.TableID_Setup', 'IsForVsl') IS NOT NULL
-            -- Same IsForVsl as the table's other rows (0 when it has none).
-            EXEC sp_executesql N'INSERT INTO dbo.TableID_Setup (TableID_SetupID, TableName, VesselID, LastNumber, IsForVsl)
-                SELECT @Id, @Table, @Vessel, @Last,
-                       ISNULL((SELECT TOP (1) IsForVsl FROM dbo.TableID_Setup WHERE TableName = @Table AND IsForVsl IS NOT NULL), 0);',
-                 N'@Id bigint, @Table varchar(50), @Vessel int, @Last bigint',
-                 @Id = @TableID_SetupID, @Table = @TableName, @Vessel = @SetupVesselID, @Last = @LastNumFromTableID;
-        ELSE
-            INSERT INTO dbo.TableID_Setup (TableID_SetupID, TableName, VesselID, LastNumber)
-            VALUES (@TableID_SetupID, @TableName, @SetupVesselID, @LastNumFromTableID);
+
+        DECLARE @Cols nvarchar(200) = N'TableID_SetupID, TableName, VesselID, LastNumber'
+                + CASE WHEN @HasOrigin = 1 THEN N', Origin' ELSE N'' END
+                + CASE WHEN COL_LENGTH(N'dbo.TableID_Setup', N'IsForVsl') IS NOT NULL THEN N', IsForVsl' ELSE N'' END;
+        DECLARE @Vals nvarchar(400) = N'@Id, @Table, @Vessel, @Last'
+                + CASE WHEN @HasOrigin = 1 THEN N', @Org' ELSE N'' END
+                -- Same IsForVsl as the table's other rows (0 when it has none).
+                + CASE WHEN COL_LENGTH(N'dbo.TableID_Setup', N'IsForVsl') IS NOT NULL
+                       THEN N', ISNULL((SELECT TOP (1) IsForVsl FROM dbo.TableID_Setup WHERE TableName = @Table AND IsForVsl IS NOT NULL), 0)'
+                       ELSE N'' END;
+        SET @Sql = N'INSERT INTO dbo.TableID_Setup (' + @Cols + N') SELECT ' + @Vals + N';';
+        EXEC sp_executesql @Sql,
+             N'@Id bigint, @Table varchar(50), @Vessel int, @Last bigint, @Org varchar(3)',
+             @Id = @TableID_SetupID, @Table = @TableName, @Vessel = @SetupVesselID, @Last = @LastNumFromTableID, @Org = @Origin;
     END;
     -------------------------------------------------------------------------------------------------------
 
-    ---- Next number
-    SET @NewTableID = @MaxNumFromTable + 1;
+    ---- Next number: after the highest of the table's own rows and the last number handed out
+    SET @NewTableID = CASE WHEN @MaxNumFromTable > @LastNumFromTableID THEN @MaxNumFromTable ELSE @LastNumFromTableID END + 1;
 
     ---- Never hand out a number another row already has (another origin or vessel, or a TableIDstart that is
     ---- missing or overlaps): carry on after the highest ID in the whole table instead.
@@ -150,9 +178,11 @@ BEGIN
     IF @Clash > 0 SET @NewTableID = @AllMax + 1;
 
     ---- Remember it in TableID_Setup (the whole block when @Incrementor > 1)
-    UPDATE dbo.TableID_Setup
-       SET LastNumber = @NewTableID + @Incrementor - 1
-     WHERE TableName = @TableName AND VesselID = @SetupVesselID;
+    SET @Sql = N'UPDATE dbo.TableID_Setup SET LastNumber = @Last' + @SetupWhere + N';';
+    DECLARE @NewLast bigint = @NewTableID + @Incrementor - 1;
+    EXEC sp_executesql @Sql,
+         N'@Table varchar(50), @Vessel int, @Org varchar(3), @Last bigint',
+         @Table = @TableName, @Vessel = @SetupVesselID, @Org = @Origin, @Last = @NewLast;
 
     COMMIT TRANSACTION;
 END;

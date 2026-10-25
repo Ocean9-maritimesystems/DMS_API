@@ -6,9 +6,13 @@
      1. Tables     every table in dbo.TableID_Setup with IsForVsl = 1, with the office columns, types, sizes,
                    nullability, defaults and primary key (no triggers, no foreign keys, no identity: on board the
                    keys come from the office or from Proc_NextID, never from an identity column).
+     0. Templates  records with VesselID = -9 are templates: first the vessel gets its own copy of them in this
+                   office database (VesselID = @VesselID, new keys), once per template - dbo.Vsl_CopyTemplateRecords,
+                   024_Vsl_TemplateRecords.sql. The copies are then copied to the ship like the vessel's other
+                   records; the -9 templates themselves are not.
      2. Records    copied exactly - same keys, same data - for:
                        VesselID = -1          (records for all vessels)
-                       VesselID = @VesselID   (records for this vessel)
+                       VesselID = @VesselID   (records for this vessel, its template copies included)
                    A table without a VesselID column is copied whole.
      3. Ship parts what DMS.Vessel.Api needs on top of the office tables: IsPendingUpload on the tables written on
                    board, V_Vessel.TableIDstart, Vsl_Staff.Fleet_CrewID (= office Vsl_StaffID) and a Password column
@@ -23,6 +27,7 @@
      EXEC dbo.Vsl_CreateVesselDatabase @VesselID = 101;                                   -- DMS_Vessel_101
      EXEC dbo.Vsl_CreateVesselDatabase @VesselID = 101, @DatabaseName = N'DMS_Vesselx',
                                        @DropExisting = 1, @IncludeFiles = 0;
+     EXEC dbo.Vsl_CreateVesselDatabase @VesselID = 101, @CopyTemplates = 0;              -- no -9 template copies
    Then back up the new database and restore it on the ship server (or point the ship API at it).
    ===================================================================================================== */
 
@@ -37,7 +42,8 @@ CREATE OR ALTER PROCEDURE dbo.Vsl_CreateVesselDatabase
     @VesselID      int,
     @DatabaseName  sysname = NULL,   -- default DMS_Vessel_<VesselID>
     @DropExisting  bit = 0,          -- 1 = drop a database of that name first (it is replaced)
-    @IncludeFiles  bit = 1           -- 0 = file contents (varbinary(max)) left empty: downloaded on board when opened
+    @IncludeFiles  bit = 1,          -- 0 = file contents (varbinary(max)) left empty: downloaded on board when opened
+    @CopyTemplates bit = 1           -- 1 = give the vessel its copy of the VesselID = -9 template records first (024)
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -65,6 +71,17 @@ BEGIN
     INSERT @tables (TableName) EXEC sp_executesql @sql;
     IF NOT EXISTS (SELECT 1 FROM @tables)
     BEGIN RAISERROR('No table in dbo.TableID_Setup has IsForVsl = 1.', 16, 1); RETURN; END;
+
+    /* ---- 0. The vessel's own copy of the template records (VesselID = -9) --------------------------------- */
+    -- Made in this office database first, so the copies are ordinary records of the vessel: they are copied to
+    -- the ship below with its other records, and changes on board sync back to them.
+    IF @CopyTemplates = 1
+    BEGIN
+        IF OBJECT_ID('dbo.Vsl_CopyTemplateRecords', 'P') IS NULL
+            PRINT 'Warning: dbo.Vsl_CopyTemplateRecords is missing (run 024_Vsl_TemplateRecords.sql): -9 template records not copied.';
+        ELSE
+            EXEC dbo.Vsl_CopyTemplateRecords @VesselID = @VesselID;
+    END;
 
     /* ---- 1. The database --------------------------------------------------------------------------------- */
     IF DB_ID(@DatabaseName) IS NOT NULL
@@ -143,6 +160,7 @@ BEGIN
           JOIN sys.types ty ON ty.user_type_id = c.system_type_id AND ty.user_type_id = ty.system_type_id
          WHERE c.object_id = OBJECT_ID(N'dbo.' + QUOTENAME(@table)) AND c.is_computed = 0;
 
+        -- (-9 = templates: not copied; the vessel's copies of them have VesselID = @VesselID.)
         SET @where = CASE WHEN COL_LENGTH(N'dbo.' + QUOTENAME(@table), 'VesselID') IS NOT NULL
                           THEN N' WHERE VesselID IN (-1, @VesselID)' ELSE N'' END;
         -- Office-only records (Other Documents added at the office, 017) stay at the office.
@@ -179,8 +197,8 @@ IF OBJECT_ID(N''dbo.SUG_Log'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.SUG_Log
     ALTER TABLE dbo.SUG_Log ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_SUG_Log_IsPendingUpload DEFAULT (0);
 IF OBJECT_ID(N''dbo.SUG_Blob'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.SUG_Blob'', N''IsPendingUpload'') IS NULL
     ALTER TABLE dbo.SUG_Blob ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_SUG_Blob_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.FLD_Folder'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.FLD_Folder'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.FLD_Folder ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_FLD_Folder_IsPendingUpload DEFAULT (0);
+IF OBJECT_ID(N''dbo.OtherDocument_Folder'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocument_Folder'', N''IsPendingUpload'') IS NULL
+    ALTER TABLE dbo.OtherDocument_Folder ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocument_Folder_IsPendingUpload DEFAULT (0);
 
 -- Start of this vessel''s ID range for Proc_NextID.
 IF OBJECT_ID(N''dbo.V_Vessel'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.V_Vessel'', N''TableIDstart'') IS NULL
@@ -261,10 +279,13 @@ BEGIN
         TableID_SetupID bigint      NOT NULL CONSTRAINT PK_TableID_Setup PRIMARY KEY,
         TableName       varchar(50) NOT NULL,
         VesselID        int         NOT NULL,
-        LastNumber      bigint      NOT NULL
+        LastNumber      bigint      NOT NULL,
+        Origin          varchar(3)  NULL      -- VSL (this vessel) / HQ; Proc_NextID reads the row by TableName + Origin + VesselID
     );
     CREATE UNIQUE INDEX IX_TableID_Setup_Table_Vessel ON dbo.TableID_Setup (TableName, VesselID);
 END;
+IF COL_LENGTH(N''dbo.TableID_Setup'', N''Origin'') IS NULL
+    ALTER TABLE dbo.TableID_Setup ADD Origin varchar(3) NULL;
 IF OBJECT_ID(N''dbo.__EFMigrationsHistory'', N''U'') IS NULL
     CREATE TABLE dbo.__EFMigrationsHistory
     (

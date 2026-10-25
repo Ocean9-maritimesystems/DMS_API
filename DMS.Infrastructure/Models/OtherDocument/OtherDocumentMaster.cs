@@ -51,24 +51,6 @@ public partial class OtherDocumentMaster
 
     public int? IsDeleted { get; set; }
 
-    public DateTime? ExpiryDate { get; set; }
-
-    // Certificates (012_NewFeatures.sql)
-    [StringLength(50)]
-    public string? CertificateNo { get; set; }
-
-    [StringLength(150)]
-    public string? IssuedBy { get; set; }
-
-    [Column(TypeName = "datetime")]
-    public DateTime? IssueDate { get; set; }
-
-    [Column(TypeName = "datetime")]
-    public DateTime? NextSurveyDate { get; set; }
-
-    /// <summary>The document this one replaces (a renewed certificate).</summary>
-    public long? ReplacesID { get; set; }
-
     [NotMapped]
     public string? CreatedBy { get; set; }
 

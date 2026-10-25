@@ -42,7 +42,7 @@ public interface ISyncService
     /// </summary>
     Task<SyncPushRowsResult> PushRowsAsync(int vesselId, SyncPushRowsRequest request);
 
-    /// <summary>The contents of a SUG_Blob / FLD_Blob row for this vessel (or all vessels); null when not its file.</summary>
+    /// <summary>The contents of a SUG_Blob row for this vessel (or all vessels); null when not its file.</summary>
     Task<(byte[] Bytes, string? FileName)?> GetFeatureFileAsync(int vesselId, string table, long blobId);
 
     /// <summary>

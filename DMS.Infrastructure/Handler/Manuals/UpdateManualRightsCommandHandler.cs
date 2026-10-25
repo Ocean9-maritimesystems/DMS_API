@@ -38,9 +38,12 @@ namespace DMS.Data.EF.Handler.Manuals
                 }
             }
 
-            foreach (int vesslID in vesselIdList)
+            // Vessel / rank pairs that are new for this manual. Their IDs are reserved as one block from Proc_NextID:
+            // asking once per row before saving would hand out the same ID again (the new rows are not in the table yet).
+            var newVslPairs = new List<(int VesselID, string UserRank)>();
+            foreach (int vesslID in vesselIdList.Distinct())
             {
-                foreach (string vslRank in vesselRankList)
+                foreach (string vslRank in vesselRankList.Distinct())
                 {
                     var existing = existingVslAcks.FirstOrDefault(x => x.VesselID == vesslID && x.UserRank == vslRank);
                     if (existing != null)
@@ -52,15 +55,24 @@ namespace DMS.Data.EF.Handler.Manuals
                     }
                     else
                     {
-                        var roleToAck = new DmManualToAckVsl();
-                        roleToAck.DmManualToAckVslId = await _dbContext.NextIdAsync<DmManualToAckVsl>(ct: cancellationToken);
-                        roleToAck.Origin = "HQ";
-                        roleToAck.DM_ManualID = DM_ManualID;
-                        roleToAck.VesselID = vesslID;
-                        roleToAck.UserRank = vslRank;
-                        roleToAck.IsActive = 1;
-                        _dbContext.DmManualToAckVsls.Add(roleToAck);
+                        newVslPairs.Add((vesslID, vslRank));
                     }
+                }
+            }
+
+            if (newVslPairs.Count > 0)
+            {
+                var nextVslAckId = await _dbContext.NextIdAsync<DmManualToAckVsl>(count: newVslPairs.Count, ct: cancellationToken);
+                foreach (var (vesslID, vslRank) in newVslPairs)
+                {
+                    var roleToAck = new DmManualToAckVsl();
+                    roleToAck.DmManualToAckVslId = nextVslAckId++;
+                    roleToAck.Origin = "HQ";
+                    roleToAck.DM_ManualID = DM_ManualID;
+                    roleToAck.VesselID = vesslID;
+                    roleToAck.UserRank = vslRank;
+                    roleToAck.IsActive = 1;
+                    _dbContext.DmManualToAckVsls.Add(roleToAck);
                 }
             }
 
@@ -79,7 +91,9 @@ namespace DMS.Data.EF.Handler.Manuals
                 }
             }
 
-            foreach (int hqUserID in hqUsersIdList)
+            // New office users: one block of IDs, for the same reason as above.
+            var newHqUsers = new List<long>();
+            foreach (long hqUserID in hqUsersIdList.Distinct())
             {
                 var existing = existingHqAcks.FirstOrDefault(x => x.HqUsersId == hqUserID);
                 if (existing != null)
@@ -91,16 +105,24 @@ namespace DMS.Data.EF.Handler.Manuals
                 }
                 else
                 {
-                    var hqToAck = new DmManualToAckHq();
-                    hqToAck.DmManualToAckHqid = await _dbContext.NextIdAsync<DmManualToAckHq>(ct: cancellationToken);
-                    hqToAck.Origin = "HQ";
-                    hqToAck.VesselID = -1;
-                    hqToAck.HqUsersId = hqUserID;
-                    hqToAck.DM_ManualID = DM_ManualID;
-                    hqToAck.Role = "";
-                    hqToAck.IsActive = 1;
-                    _dbContext.DmManualToAckHqs.Add(hqToAck);
+                    newHqUsers.Add(hqUserID);
                 }
+            }
+
+            var nextHqAckId = newHqUsers.Count > 0
+                ? await _dbContext.NextIdAsync<DmManualToAckHq>(count: newHqUsers.Count, ct: cancellationToken)
+                : 0;
+            foreach (long hqUserID in newHqUsers)
+            {
+                var hqToAck = new DmManualToAckHq();
+                hqToAck.DmManualToAckHqid = nextHqAckId++;
+                hqToAck.Origin = "HQ";
+                hqToAck.VesselID = -1;
+                hqToAck.HqUsersId = hqUserID;
+                hqToAck.DM_ManualID = DM_ManualID;
+                hqToAck.Role = "";
+                hqToAck.IsActive = 1;
+                _dbContext.DmManualToAckHqs.Add(hqToAck);
             }
 
             await _dbContext.SaveChangesAsync(cancellationToken);

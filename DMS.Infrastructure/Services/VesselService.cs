@@ -185,16 +185,24 @@ public class VesselService : IVesselService
         var result = new VesselSyncHistoryDto { SyncInstalled = await _sync.IsInstalledAsync() };
         if (!result.SyncInstalled) return result;
 
-        var key = await _dbContext.SyncVesselKeys.AsNoTracking()
-            .Where(k => k.VesselID == vesselId && k.IsActive)
-            .Select(k => new { k.CreatedUtc, k.CreatedBy, k.LastUsedUtc })
-            .FirstOrDefaultAsync();
-        if (key != null)
+        // The key is extra information: if it cannot be read, the history is still shown (KeyError says why).
+        try
         {
-            result.HasKey = true;
-            result.KeyCreatedUtc = Utc(key.CreatedUtc);
-            result.KeyCreatedBy = key.CreatedBy;
-            result.KeyLastUsedUtc = key.LastUsedUtc == null ? null : Utc(key.LastUsedUtc.Value);
+            var key = await _dbContext.SyncVesselKeys.AsNoTracking()
+                .Where(k => k.VesselID == vesselId && k.IsActive)
+                .Select(k => new { k.CreatedUtc, k.CreatedBy, k.LastUsedUtc })
+                .FirstOrDefaultAsync();
+            if (key != null)
+            {
+                result.HasKey = true;
+                result.KeyCreatedUtc = Utc(key.CreatedUtc);
+                result.KeyCreatedBy = key.CreatedBy;
+                result.KeyLastUsedUtc = key.LastUsedUtc == null ? null : Utc(key.LastUsedUtc.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            result.KeyError = ex.GetBaseException().Message;
         }
 
         var entries = await _dbContext.SyncLogs.AsNoTracking()

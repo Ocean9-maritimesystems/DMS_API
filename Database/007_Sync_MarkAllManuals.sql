@@ -20,7 +20,7 @@
 SET NOCOUNT ON;
 
 DECLARE @VesselID int = -1;
-DECLARE @Apply    bit = 0;
+DECLARE @Apply    bit = 1;
 
 IF OBJECT_ID('dbo.Sync_Outbox', 'U') IS NULL OR OBJECT_ID('dbo.Sync_Enqueue', 'P') IS NULL
    OR OBJECT_ID('dbo.DM_Manual', 'U') IS NULL

@@ -51,7 +51,16 @@ public class VesselController : DmsControllerBase
     public async Task<ActionResult<VesselSyncHistoryDto>> GetVesselSyncHistory(int vesselId)
     {
         _logger.LogInformation("Get sync history for vessel {VesselId}", vesselId);
-        return Ok(await _service.GetVesselSyncHistoryAsync(vesselId));
+        try
+        {
+            return Ok(await _service.GetVesselSyncHistoryAsync(vesselId));
+        }
+        catch (Exception ex)
+        {
+            // Said in the reply (ProblemDetails.detail), so the page shows why instead of "Something went wrong".
+            _logger.LogError(ex, "Sync history for vessel {VesselId} failed", vesselId);
+            return Problem(title: "The sync history could not be loaded.", detail: ex.GetBaseException().Message, statusCode: 500);
+        }
     }
 
     /// <summary>Sync monitor: one row per vessel with link state, items waiting to go out and alerts not acknowledged.</summary>

@@ -31,6 +31,8 @@ public class VesselSyncHistoryDto
     public DateTime? KeyCreatedUtc { get; set; }
     public string? KeyCreatedBy { get; set; }
     public DateTime? KeyLastUsedUtc { get; set; }
+    /// <summary>Why the key could not be read (the history is still returned); null when it was read.</summary>
+    public string? KeyError { get; set; }
     public List<VesselSyncLogDto> Entries { get; set; } = new();
 }
 

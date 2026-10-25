@@ -442,8 +442,8 @@ public class OtherDocumentService : IOtherDocumentService
                 OtherDocument_FolderID = d.OtherDocument_FolderID, FolderName = folder?.FolderName, OtherDocument_TypeID = d.OtherDocument_TypeID,
                 DocumentType = type?.DocumentType, DocumentNumber = d.DocumentNumber, DocumentTitle = d.DocumentTitle,
                 Status = d.Status, Reference = d.Reference, Comments = d.Comments, UploadedOn = d.UploadedOn,
-                UploadedBy = d.UploadedBy, Origin = d.Origin, IsCertificate = type?.IsCertificate == 1,
-                ExpiryDate = d.ExpiryDate, FileCount = blob?.Count ?? 0, FirstFileID = blob?.First };
+                UploadedBy = d.UploadedBy, Origin = d.Origin,
+                FileCount = blob?.Count ?? 0, FirstFileID = blob?.First };
         });
         return (orderByType ? result.OrderBy(d => d.DocumentType).ThenBy(d => d.DocumentNumber) : result.OrderByDescending(d => d.UploadedOn)).ToList();
     }

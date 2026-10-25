@@ -13,16 +13,19 @@
     up as a "DocumentFolder" row (api/Sync/PushRows). Personal folders on board and their documents never leave the ship.
 */
 SET NOCOUNT ON;
+-- FLD_FolderID is renamed to OtherDocument_FolderID by 022_RenameFolderTable.sql.
 
 IF OBJECT_ID('dbo.Feat_AddColumn', 'P') IS NULL
     THROW 50000, 'Run 012_NewFeatures.sql first.', 1;
 
-EXEC dbo.Feat_AddColumn 'OtherDocumentMaster', 'FLD_FolderID', 'bigint NULL';
+IF COL_LENGTH('dbo.OtherDocumentMaster', 'OtherDocument_FolderID') IS NULL
+    EXEC dbo.Feat_AddColumn 'OtherDocumentMaster', 'FLD_FolderID', 'bigint NULL';
 EXEC dbo.Feat_AddColumn 'OtherDocumentMaster', 'RelatedVesselID', 'int NULL';
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_OtherDocumentMaster_Folder' AND object_id = OBJECT_ID('dbo.OtherDocumentMaster'))
-    CREATE INDEX IX_OtherDocumentMaster_Folder ON dbo.OtherDocumentMaster (FLD_FolderID) WHERE FLD_FolderID IS NOT NULL;
+   AND COL_LENGTH('dbo.OtherDocumentMaster', 'FLD_FolderID') IS NOT NULL
+    EXEC sp_executesql N'CREATE INDEX IX_OtherDocumentMaster_Folder ON dbo.OtherDocumentMaster (FLD_FolderID) WHERE FLD_FolderID IS NOT NULL;';
 GO
 
 PRINT '013_DocumentFolders: OtherDocumentMaster.FLD_FolderID and RelatedVesselID are in place.';

@@ -9,7 +9,7 @@ namespace DMS.Data.EF.Features;
 
 /// <summary>
 /// Feature 8, phase 1: one search box over manuals (number, name and the text of the latest version), circulars and
-/// alerts, other documents and certificates, and suggestions. LIKE matching in dbo.Api_Search (Database/020_ApiProcedures.sql), every word must match.
+/// alerts, other documents and suggestions. LIKE matching in dbo.Api_Search (Database/020_ApiProcedures.sql), every word must match.
 /// Phase 2 (AI assistant over the same sources, through a cloud provider) plugs in behind this same service.
 /// </summary>
 public sealed partial class SearchService : ISearchService

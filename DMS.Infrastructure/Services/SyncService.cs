@@ -807,9 +807,6 @@ public partial class SyncService : ISyncService
         var uploadedOn = doc.UploadedOn.HasValue ? ToUtc(doc.UploadedOn.Value) : DateTime.UtcNow;
         // The IDs given on board (Proc_NextID, this vessel's range) when free here, else new ones in that range.
         var masterId = await _other.KeepOrNextIdAsync<OtherDocumentMaster>(doc.VesselDocumentID, TableIdExtensions.OriginVessel, vesselId);
-        long? replacesId = doc.ReplacesID != null && await _other.OtherDocumentMaster.AnyAsync(r => r.OtherDocumentMasterID == doc.ReplacesID)
-            ? doc.ReplacesID
-            : null;
         _other.OtherDocumentMaster.Add(new OtherDocumentMaster
         {
             OtherDocumentMasterID = masterId,
@@ -826,13 +823,6 @@ public partial class SyncService : ISyncService
             IsDeleted = 0,
             ModifiedBy = Truncate(doc.UploadedBy?.Trim(), 50),
             ModifiedDate = uploadedOn,
-            // Certificates (Database/012_NewFeatures.sql); ReplacesID only when that document is at the office.
-            CertificateNo = Truncate(doc.CertificateNo?.Trim(), 50),
-            IssuedBy = Truncate(doc.IssuedBy?.Trim(), 150),
-            IssueDate = doc.IssueDate?.Date,
-            ExpiryDate = doc.ExpiryDate?.Date,
-            NextSurveyDate = doc.NextSurveyDate?.Date,
-            ReplacesID = replacesId,
             OtherDocument_FolderID = doc.OtherDocument_FolderID,
         });
 

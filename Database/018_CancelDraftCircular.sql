@@ -19,6 +19,8 @@ BEGIN
 END;
 GO
 
+select * from DMS_Inbox
+
 CREATE OR ALTER TRIGGER dbo.TR_CIR_Master_Inbox ON dbo.CIR_Master AFTER INSERT, UPDATE
 AS
 BEGIN

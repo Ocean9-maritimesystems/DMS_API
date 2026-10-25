@@ -10,7 +10,7 @@ namespace DMS.Data.EF;
 /// while it does so, so two users saving at the same time never get the same ID.
 ///
 ///   Origin "HQ"  - office rows: no vessel check (VesselID is ignored).
-///   Origin "VSL" - rows from a vessel: numbered in that vessel's own range (V_Vessels.TableIDstart).
+///   Origin "VSL" - rows from a vessel: numbered in that vessel's own range (V_Vessel.TableIDstart).
 /// </summary>
 public static class TableIdExtensions
 {
