@@ -795,14 +795,37 @@ public partial class SyncService : ISyncService
         if (!await _other.OtherDocument_Type.AsNoTracking().AnyAsync(t => t.OtherDocument_TypeID == doc.OtherDocument_TypeID))
             return new OtherDocumentPushResult { Error = $"Document type {doc.OtherDocument_TypeID} is not known at the office." };
 
-        // Sent before (the answer was lost on the way back): return what is held.
+        // Sent before (the answer was lost on the way back, or the vessel sends it again because one of its files has
+        // not reached the office): keep what is held and add the files that are not here yet.
         var held = await _other.OtherDocumentMaster.AsNoTracking()
             .Where(m => m.VesselID == vesselId && m.Origin == "VSL" && (m.IsDeleted ?? 0) != 1
                         && m.OtherDocument_TypeID == doc.OtherDocument_TypeID && m.DocumentNumber == number)
             .Select(m => (long?)m.OtherDocumentMasterID)
             .FirstOrDefaultAsync();
         if (held != null)
-            return await OtherDocumentPushResultAsync(held.Value, doc, alreadyApplied: true);
+        {
+            var heldFiles = await _other.OtherDocument_Blob.AsNoTracking()
+                .Where(b => b.OtherDocumentMasterID == held.Value)
+                .Select(b => new { b.OtherDocument_BlobID, b.FileName, b.BlobSize })
+                .ToListAsync();
+            var added = 0;
+            for (var i = 0; i < files.Count; i++)
+            {
+                var f = doc.Files[i];
+                if (files[i].Length == 0) continue; // a file the vessel only knows by name (no contents on board)
+                var name = Truncate(f.FileName, 150);
+                if (heldFiles.Any(h => h.OtherDocument_BlobID == f.VesselFileID || (h.FileName == name && h.BlobSize == files[i].Length)))
+                    continue;
+                await AddPushedFileAsync(vesselId, held.Value, f, files[i]);
+                added++;
+            }
+            if (added > 0)
+            {
+                await _other.SaveChangesAsync();
+                _other.ChangeTracker.Clear();
+            }
+            return await OtherDocumentPushResultAsync(held.Value, doc, alreadyApplied: added == 0);
+        }
 
         var uploadedOn = doc.UploadedOn.HasValue ? ToUtc(doc.UploadedOn.Value) : DateTime.UtcNow;
         // The IDs given on board (Proc_NextID, this vessel's range) when free here, else new ones in that range.
@@ -827,55 +850,44 @@ public partial class SyncService : ISyncService
         });
 
         for (var i = 0; i < files.Count; i++)
-        {
-            var f = doc.Files[i];
-            var fileId = await _other.KeepOrNextIdAsync<OtherDocument_Blob>(f.VesselFileID, TableIdExtensions.OriginVessel, vesselId);
-            var fileName = Truncate(f.FileName, 150);
-            // Kept at the office in the database, a local folder or the cloud, as BlobTableSettings says for OtherDocument_Blob.
-            var stored = await _storage.SaveAsync(AttachmentStorage.OtherDocumentTable, fileId, fileName, files[i]);
-            _other.OtherDocument_Blob.Add(new OtherDocument_Blob
-            {
-                OtherDocument_BlobID = fileId,
-                OtherDocumentMasterID = masterId,
-                Origin = "VSL",
-                VesselID = vesselId,
-                Description = Truncate(f.Description ?? f.FileName, 150),
-                FileName = fileName,
-                FileType = Truncate(f.FileType, 50),
-                OriginalFileType = Truncate(f.OriginalFileType, 50),
-                BlobSize = files[i].Length,
-                BlobContents = stored.BlobContents,
-                AddedOn = f.AddedOn.HasValue ? ToUtc(f.AddedOn.Value) : DateTime.UtcNow,
-                Cloud_ContainerName = stored.Cloud_ContainerName,
-                Cloud_Directory = stored.Cloud_Directory,
-                HQ_Storage_Option = stored.HQ_Storage_Option,
-                HQ_Local_Folder = stored.HQ_Local_Folder,
-                HQ_DatabaseName = stored.HQ_DatabaseName,
-                VSL_Storage_Option = stored.VSL_Storage_Option,
-                VSL_Local_Folder = stored.VSL_Local_Folder,
-                VSL_DatabaseName = stored.VSL_DatabaseName,
-            });
-        }
+            await AddPushedFileAsync(vesselId, masterId, doc.Files[i], files[i]);
 
-        // The log row is written here at the office: an office (HQ) ID.
-        var logId = await _other.NextIdAsync<OtherDocument_Log>();
-        _other.OtherDocument_Log.Add(new OtherDocument_Log
-        {
-            OtherDocument_LogID = logId,
-            Origin = "HQ",
-            VesselID = vesselId,
-            OtherDocumentMasterID = masterId,
-            LogDate = DateTime.Now,
-            Activity = Truncate("New " + number + " Added on board", 150)!,
-            Remarks = Truncate($"{number}: {doc.Reference} (added on vessel {vesselId} by {doc.UploadedBy}, {files.Count} file(s))", 3000),
-            UserName = Truncate(doc.UploadedBy, 150),
-            UserRank = "",
-        });
-
-        await _other.SaveChangesAsync(); // one transaction: the document, its files and the log row, or nothing
+        // No log row here: the vessel wrote its own "Added" log when the document was added on board.
+        await _other.SaveChangesAsync(); // one transaction: the document and its files, or nothing
         _other.ChangeTracker.Clear();     // the file bytes are not needed in memory any longer
 
         return await OtherDocumentPushResultAsync(masterId, doc, alreadyApplied: false);
+    }
+
+    /// <summary>Adds (not yet saved) one file a vessel sent with a document, under the ID given on board when it is free here.</summary>
+    private async Task AddPushedFileAsync(int vesselId, long masterId, OtherDocumentPushFileDto f, byte[] bytes)
+    {
+        var fileId = await _other.KeepOrNextIdAsync<OtherDocument_Blob>(f.VesselFileID, TableIdExtensions.OriginVessel, vesselId);
+        var fileName = Truncate(f.FileName, 150);
+        // Kept at the office in the database, a local folder or the cloud, as BlobTableSettings says for OtherDocument_Blob.
+        var stored = await _storage.SaveAsync(AttachmentStorage.OtherDocumentTable, fileId, fileName, bytes);
+        _other.OtherDocument_Blob.Add(new OtherDocument_Blob
+        {
+            OtherDocument_BlobID = fileId,
+            OtherDocumentMasterID = masterId,
+            Origin = "VSL",
+            VesselID = vesselId,
+            Description = Truncate(f.Description ?? f.FileName, 150),
+            FileName = fileName,
+            FileType = Truncate(f.FileType, 50),
+            OriginalFileType = Truncate(f.OriginalFileType, 50),
+            BlobSize = bytes.Length,
+            BlobContents = stored.BlobContents,
+            AddedOn = f.AddedOn.HasValue ? ToUtc(f.AddedOn.Value) : DateTime.UtcNow,
+            Cloud_ContainerName = stored.Cloud_ContainerName,
+            Cloud_Directory = stored.Cloud_Directory,
+            HQ_Storage_Option = stored.HQ_Storage_Option,
+            HQ_Local_Folder = stored.HQ_Local_Folder,
+            HQ_DatabaseName = stored.HQ_DatabaseName,
+            VSL_Storage_Option = stored.VSL_Storage_Option,
+            VSL_Local_Folder = stored.VSL_Local_Folder,
+            VSL_DatabaseName = stored.VSL_DatabaseName,
+        });
     }
 
     /// <summary>The office rows for a document a vessel sent, read back as stored (datetime precision included).</summary>

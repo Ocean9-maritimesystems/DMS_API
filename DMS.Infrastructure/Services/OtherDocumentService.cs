@@ -494,6 +494,7 @@ public class OtherDocumentService : IOtherDocumentService
         if (files.Any(f => f.Bytes.Length > maxBytes)) return (null, $"Files must be {maxBytes / 1024 / 1024} MB or smaller.");
 
         var id = await _db.NextIdAsync("OtherDocumentMaster");
+        var logId = await _db.NextIdAsync("OtherDocument_Log");
         var blobId = files.Count > 0 ? await _db.NextIdAsync("OtherDocument_Blob", count: files.Count) : 0;
 
         // Each file goes to the database, a local folder or the cloud, as BlobTableSettings says for OtherDocument_Blob.
@@ -560,7 +561,20 @@ public class OtherDocumentService : IOtherDocumentService
                     VSL_DatabaseName = f.Stored.VSL_DatabaseName,
                     VSL_Local_Folder = f.Stored.VSL_Local_Folder,
                 });
-            await _dbContext.SaveChangesAsync();   // the document and its files in one transaction
+            _dbContext.OtherDocument_Log.Add(new OtherDocument_Log
+            {
+                OtherDocument_LogID = logId,
+                Origin = SqlDb.Office,
+                VesselID = vesselId,
+                OtherDocumentMasterID = id,
+                LogDate = DateTime.Now,
+                Activity = Cut("New " + number + " Added", 150)!,
+                Remarks = Cut($"{number}: {title} ({saved.Count} file(s))", 3000),
+                UserId = Cut(user.UserId, 150),
+                UserName = Cut(user.UserName, 150),
+                UserRank = Cut(user.Role, 50) ?? "",
+            });
+            await _dbContext.SaveChangesAsync();   // the document, its files and the log row in one transaction
         }
         catch
         {

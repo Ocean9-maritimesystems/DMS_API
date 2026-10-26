@@ -70,13 +70,17 @@ BEGIN
     BEGIN RAISERROR('Vsl_CopyTemplateRecords: dbo.TableID_Setup has no IsForVsl column.', 16, 1); RETURN; END;
 
     /* ---- The vessel tables, with their key ------------------------------------------------------------- */
-    DECLARE @vslTables TABLE (TableName sysname PRIMARY KEY);
+    -- COLLATE DATABASE_DEFAULT on every name column of the table variables: they are compared with this database's
+    -- catalogue and tables, and without it they can take the server (tempdb) collation instead ("Cannot resolve the
+    -- collation conflict between SQL_Latin1_General_CP1_CI_AS and Latin1_General_CI_AS").
+    DECLARE @vslTables TABLE (TableName sysname COLLATE DATABASE_DEFAULT PRIMARY KEY);
     INSERT @vslTables (TableName)
-    EXEC sp_executesql N'SELECT DISTINCT CAST(TableName AS sysname) FROM dbo.TableID_Setup
+    EXEC sp_executesql N'SELECT DISTINCT CAST(TableName AS sysname) COLLATE DATABASE_DEFAULT FROM dbo.TableID_Setup
                           WHERE IsForVsl = 1 AND OBJECT_ID(N''dbo.'' + QUOTENAME(TableName), N''U'') IS NOT NULL';
 
     -- Copyable: VesselID column + single-column int/bigint primary key.
-    DECLARE @tables TABLE (TableName sysname PRIMARY KEY, KeyColumn sysname NULL, IsIdentity bit NULL, Copyable bit NOT NULL);
+    DECLARE @tables TABLE (TableName sysname COLLATE DATABASE_DEFAULT PRIMARY KEY, KeyColumn sysname COLLATE DATABASE_DEFAULT NULL,
+                           IsIdentity bit NULL, Copyable bit NOT NULL);
     INSERT @tables (TableName, KeyColumn, IsIdentity, Copyable)
     SELECT v.TableName, k.KeyColumn, k.IsIdentity,
            CASE WHEN k.KeyColumn IS NOT NULL THEN 1 ELSE 0 END
@@ -169,7 +173,9 @@ BEGIN
         -- own table) that still holds a template key is changed to the key of this vessel's copy of that template.
         IF @Copied > 0
         BEGIN
-            DECLARE @links TABLE (TableName sysname, KeyColumn sysname, ColumnName sysname, TargetTable sysname, TargetKey sysname);
+            DECLARE @links TABLE (TableName sysname COLLATE DATABASE_DEFAULT, KeyColumn sysname COLLATE DATABASE_DEFAULT,
+                                  ColumnName sysname COLLATE DATABASE_DEFAULT, TargetTable sysname COLLATE DATABASE_DEFAULT,
+                                  TargetKey sysname COLLATE DATABASE_DEFAULT);
             INSERT @links (TableName, KeyColumn, ColumnName, TargetTable, TargetKey)
             SELECT DISTINCT src.TableName, src.KeyColumn, c.name, tgt.TableName, tgt.KeyColumn
               FROM @tables src

@@ -215,25 +215,6 @@ CREATE TABLE dbo.SUG_Blob
     AddedOn       datetime       NULL
 );
 
--- Renamed to dbo.OtherDocument_Folder (key OtherDocument_FolderID) by 022_RenameFolderTable.sql.
-IF OBJECT_ID('dbo.FLD_Folder', 'U') IS NULL AND OBJECT_ID('dbo.OtherDocument_Folder', 'U') IS NULL
-CREATE TABLE dbo.FLD_Folder
-(
-    FLD_FolderID  bigint         NOT NULL CONSTRAINT PK_FLD_Folder PRIMARY KEY,
-    Origin        varchar(3)     NOT NULL,
-    VesselID      int            NOT NULL,    -- Company: -1 or a vessel; Vessel: the vessel; Department / Personal: -2 at the office
-    ParentID      bigint         NULL,
-    FolderName    nvarchar(150)  NOT NULL,
-    Scope         varchar(20)    NOT NULL,    -- Company | Vessel | Department | Personal
-    OwnerUserID   varchar(50)    NULL,        -- Personal: the owner; Department: the department
-    ViewRoles     nvarchar(500)  NULL,        -- comma-separated roles / ranks that may open it; NULL = everyone in the scope
-    EditRoles     nvarchar(500)  NULL,        -- comma-separated roles / ranks that may change it; NULL = owner / office only
-    SortOrder     int            NULL,
-    CreatedBy     varchar(50)    NULL,
-    CreatedOn     datetime       NULL,
-    IsDeleted     int            NOT NULL CONSTRAINT DF_FLD_Folder_IsDeleted DEFAULT (0)
-);
-GO
 
 EXEC dbo.Feat_AddSetting 'DM_Settings', 'FLD_MaxFileSizeMB', '25';
 EXEC dbo.Feat_AddSetting 'DM_Settings', 'FLD_MaxFiles', '1000';
@@ -363,35 +344,6 @@ BEGIN
 END
 GO
 
-/* Certificates entering their warning window or expiring: one inbox entry each time (run by the office API). */
-CREATE OR ALTER PROCEDURE dbo.Inbox_CertificateExpiry
-AS
-BEGIN
-    SET NOCOUNT ON;
-    DECLARE @rows TABLE (ID bigint, VesselID int, Action varchar(20), Title nvarchar(500));
-    INSERT @rows
-    SELECT m.OtherDocumentMasterID, m.VesselID,
-           CASE WHEN m.ExpiryDate < CAST(GETDATE() AS date) THEN 'Expired' ELSE 'Expiring' END,
-           LEFT(LTRIM(ISNULL(m.DocumentNumber, '') + ' ' + ISNULL(m.DocumentTitle, '')), 500)
-      FROM dbo.OtherDocumentMaster m
-      JOIN dbo.OtherDocument_Type t ON t.OtherDocument_TypeID = m.OtherDocument_TypeID AND t.IsCertificate = 1
-     WHERE ISNULL(m.IsDeleted, 0) <> 1 AND m.ExpiryDate IS NOT NULL
-       AND m.ExpiryDate < DATEADD(day, t.WarningDays, CAST(GETDATE() AS date))
-       AND NOT EXISTS (SELECT 1 FROM dbo.OtherDocumentMaster n WHERE n.ReplacesID = m.OtherDocumentMasterID AND ISNULL(n.IsDeleted, 0) <> 1)
-       AND NOT EXISTS (SELECT 1 FROM dbo.DMS_Inbox x WHERE x.ItemType = 'Certificate' AND x.ItemID = m.OtherDocumentMasterID
-                         AND x.Action = CASE WHEN m.ExpiryDate < CAST(GETDATE() AS date) THEN 'Expired' ELSE 'Expiring' END);
-    DECLARE @id bigint, @vessel int, @action varchar(20), @title nvarchar(500);
-    DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT ID, VesselID, Action, Title FROM @rows;
-    OPEN c; FETCH NEXT FROM c INTO @id, @vessel, @action, @title;
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        EXEC dbo.Inbox_Add @vessel, 'Certificate', @id, NULL, @action, @title, NULL;
-        FETCH NEXT FROM c INTO @id, @vessel, @action, @title;
-    END
-    CLOSE c; DEALLOCATE c;
-END
-GO
-
 /* ------------------------------------------------------- Sync: -2 = office only (never sent) ---- */
 
 CREATE OR ALTER PROCEDURE dbo.Sync_LogChanges
@@ -459,53 +411,33 @@ GO
 
 /* ------------------------------------------------- Which new tables sync, and which ships hold ---- */
 
--- Office -> vessels (row-by-row sync). DMS_InboxRead is not sent down: read receipts only go up.
-MERGE dbo.Sync_Table AS t
-USING (VALUES
-    ('CIR_ManualLink', 250, NULL,           0),
-    ('DMS_Inbox',      400, NULL,           0),
-    ('SUG_Master',     500, NULL,           0),
-    ('SUG_Log',        510, NULL,           0),
-    ('SUG_Blob',       520, 'BlobContents', 0),
-    ('FLD_Folder',     600, NULL,           0)
-) AS s (TableName, SortOrder, BlobColumn, AllVessels)
-ON t.TableName = s.TableName
-WHEN NOT MATCHED THEN INSERT (TableName, SortOrder, BlobColumn, AllVessels) VALUES (s.TableName, s.SortOrder, s.BlobColumn, s.AllVessels);
--- Run again after 022_RenameFolderTable.sql: the folders are synced as OtherDocument_Folder.
-IF OBJECT_ID('dbo.OtherDocument_Folder', 'U') IS NOT NULL
-    DELETE FROM dbo.Sync_Table WHERE TableName = 'FLD_Folder';
-GO
 EXEC dbo.Sync_CreateRowTriggers;
 GO
 
--- Tables a new vessel database gets (Vsl_CreateVesselDatabase copies TableID_Setup rows with IsForVsl = 1).
-IF COL_LENGTH('dbo.TableID_Setup', 'IsForVsl') IS NOT NULL
-BEGIN
-    DECLARE @t TABLE (TableName varchar(50));
-    INSERT @t VALUES ('CIR_ManualLink'), ('DMS_Inbox'), ('DMS_InboxRead'), ('SUG_Master'), ('SUG_Log'), ('SUG_Blob'),
-                     ('FLD_Folder');
-    DECLARE @name varchar(50), @id bigint;
-    DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT TableName FROM @t;
-    OPEN c; FETCH NEXT FROM c INTO @name;
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        IF EXISTS (SELECT 1 FROM dbo.TableID_Setup WHERE TableName = @name)
-            EXEC sp_executesql N'UPDATE dbo.TableID_Setup SET IsForVsl = 1 WHERE TableName = @n', N'@n varchar(50)', @n = @name;
-        ELSE
-        BEGIN
-            SELECT @id = ISNULL(MAX(TableID_SetupID), 0) + 1 FROM dbo.TableID_Setup;
-            EXEC sp_executesql N'INSERT dbo.TableID_Setup (TableID_SetupID, TableName, VesselID, LastNumber, IsForVsl)
-                                 VALUES (@id, @n, -1, 0, 1)', N'@id bigint, @n varchar(50)', @id = @id, @n = @name;
-        END
-        FETCH NEXT FROM c INTO @name;
-    END
-    CLOSE c; DEALLOCATE c;
-END
-GO
-
-IF OBJECT_ID('dbo.OtherDocument_Folder', 'U') IS NOT NULL AND OBJECT_ID('dbo.TableID_Setup', 'U') IS NOT NULL
-    DELETE FROM dbo.TableID_Setup WHERE TableName = 'FLD_Folder';   -- renamed by 022_RenameFolderTable.sql
-GO
+---- Tables a new vessel database gets (Vsl_CreateVesselDatabase copies TableID_Setup rows with IsForVsl = 1).
+--IF COL_LENGTH('dbo.TableID_Setup', 'IsForVsl') IS NOT NULL
+--BEGIN
+--    DECLARE @t TABLE (TableName varchar(50));
+--    INSERT @t VALUES ('CIR_ManualLink'), ('DMS_Inbox'), ('DMS_InboxRead'), ('SUG_Master'), ('SUG_Log'), ('SUG_Blob'),
+--                     ('FLD_Folder');
+--    DECLARE @name varchar(50), @id bigint;
+--    DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT TableName FROM @t;
+--    OPEN c; FETCH NEXT FROM c INTO @name;
+--    WHILE @@FETCH_STATUS = 0
+--    BEGIN
+--        IF EXISTS (SELECT 1 FROM dbo.TableID_Setup WHERE TableName = @name)
+--            EXEC sp_executesql N'UPDATE dbo.TableID_Setup SET IsForVsl = 1 WHERE TableName = @n', N'@n varchar(50)', @n = @name;
+--        ELSE
+--        BEGIN
+--            SELECT @id = ISNULL(MAX(TableID_SetupID), 0) + 1 FROM dbo.TableID_Setup;
+--            EXEC sp_executesql N'INSERT dbo.TableID_Setup (TableID_SetupID, TableName, VesselID, LastNumber, IsForVsl)
+--                                 VALUES (@id, @n, -1, 0, 1)', N'@id bigint, @n varchar(50)', @id = @id, @n = @name;
+--        END
+--        FETCH NEXT FROM c INTO @name;
+--    END
+--    CLOSE c; DEALLOCATE c;
+--END
+--GO
 
 PRINT 'New features are ready in the office database.';
 GO

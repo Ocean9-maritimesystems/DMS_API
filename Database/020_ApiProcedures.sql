@@ -73,11 +73,17 @@ BEGIN
     IF @t LIKE '%,Circular,%'
         INSERT @hits
         SELECT TOP (@PerType) 2, ROW_NUMBER() OVER (ORDER BY COALESCE(c.ReleasedDate, c.DateIssued, c.CreatedDate) DESC),
-               CASE WHEN c.CircularType = 'Alert' THEN 'Alert' ELSE 'Circular' END, c.CIR_MasterID,
+               CASE WHEN c.CircularType LIKE 'Alert%' THEN 'Alert' ELSE 'Circular' END, c.CIR_MasterID,
                c.CIR_Number, c.Title, LEFT(c.Remarks, 400), c.VesselID, COALESCE(c.ReleasedDate, c.DateIssued, c.CreatedDate)
           FROM dbo.CIR_Master c
          CROSS APPLY (SELECT ISNULL(c.CIR_Number, '') + ' ' + ISNULL(c.Title, '') + ' ' + ISNULL(c.Reference, '') + ' ' + ISNULL(c.Remarks, '') AS Hay) h
-         WHERE ISNULL(c.IsDeleted, 0) <> 1
+         -- Only what the Circulars / Alerts lists show (dbo.GetCIRMasterList), so every result opens there:
+         -- not deleted, not an unsaved Temp record, in Vw_CIR_MasterBlob with a known category.
+         WHERE c.IsDeleted = 0
+           AND ISNULL(c.Status, '') <> 'Temp'
+           AND EXISTS (SELECT 1 FROM dbo.Vw_CIR_MasterBlob vb
+                         JOIN dbo.CIR_Category cat ON cat.CIR_CategoryID = vb.CIR_CategoryID
+                        WHERE vb.CIR_MasterID = c.CIR_MasterID AND vb.IsDeleted = 0)
            AND h.Hay LIKE @W0 ESCAPE '\' AND (@W1 IS NULL OR h.Hay LIKE @W1 ESCAPE '\') AND (@W2 IS NULL OR h.Hay LIKE @W2 ESCAPE '\')
            AND (@W3 IS NULL OR h.Hay LIKE @W3 ESCAPE '\') AND (@W4 IS NULL OR h.Hay LIKE @W4 ESCAPE '\') AND (@W5 IS NULL OR h.Hay LIKE @W5 ESCAPE '\')
          ORDER BY COALESCE(c.ReleasedDate, c.DateIssued, c.CreatedDate) DESC;

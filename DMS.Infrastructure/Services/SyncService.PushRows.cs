@@ -22,11 +22,12 @@ public partial class SyncService
         ["SUG_Log"] = "SUG_LogID",
         ["SUG_Blob"] = "SUG_BlobID",
         ["OtherDocument_Folder"] = "OtherDocument_FolderID",
+        ["OtherDocument_Log"] = "OtherDocument_LogID",
     };
 
     /// <summary>Records the office owns once stored: a repeat from the ship never overwrites the office's changes.</summary>
     private static readonly HashSet<string> InsertOnlyTables = new(StringComparer.OrdinalIgnoreCase)
-        { "DMS_InboxRead", "SUG_Master", "SUG_Log", "SUG_Blob" };
+        { "DMS_InboxRead", "SUG_Master", "SUG_Log", "SUG_Blob", "OtherDocument_Log" };
 
     /// <summary>The EF entity of each pushable table (all mapped in GeneralContext).</summary>
     private static readonly IReadOnlyDictionary<string, Type> PushableEntities = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase)
@@ -36,6 +37,7 @@ public partial class SyncService
         ["SUG_Log"] = typeof(SugLog),
         ["SUG_Blob"] = typeof(SugBlob),
         ["OtherDocument_Folder"] = typeof(FldFolder),
+        ["OtherDocument_Log"] = typeof(OtherDocument_Log),
     };
 
     public async Task<SyncPushRowsResult> PushRowsAsync(int vesselId, SyncPushRowsRequest request)
@@ -166,12 +168,15 @@ public partial class SyncService
         {
             "SUG_Log" or "SUG_Blob" => ("SUG_Master", "SUG_MasterID"),
             "DMS_InboxRead" => ("DMS_Inbox", "DMS_InboxID"),
+            "OtherDocument_Log" => ("OtherDocumentMaster", "OtherDocumentMasterID"),
             _ => null,
         };
         if (parent == null) return null;
         if (values.GetValueOrDefault(parent.Value.Column) is not long id) return $"{table} has no {parent.Value.Column}.";
 
-        int? ownerVessel = parent.Value.Table == "SUG_Master"
+        int? ownerVessel = parent.Value.Table == "OtherDocumentMaster"
+            ? await _other.OtherDocumentMaster.AsNoTracking().Where(m => m.OtherDocumentMasterID == id && (m.IsDeleted ?? 0) != 1).Select(m => (int?)m.VesselID).FirstOrDefaultAsync()
+            : parent.Value.Table == "SUG_Master"
             ? await _general.SugMasters.AsNoTracking().Where(m => m.SUG_MasterID == id).Select(m => (int?)m.VesselID).FirstOrDefaultAsync()
             : await _general.DmsInbox.AsNoTracking().Where(i => i.DMS_InboxID == id).Select(i => (int?)i.VesselID).FirstOrDefaultAsync();
         if (ownerVessel == null) return $"{parent.Value.Table} {id} is not at the office yet.";

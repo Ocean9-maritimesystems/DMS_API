@@ -66,7 +66,7 @@ USING (VALUES
     ('V_Vessel',               10, NULL,           1),
     ('DM_Status',              20, NULL,           0),
     ('DM_Settings',            30, NULL,           0),
-    ('CIR_Setting',            40, NULL,           0),
+    ('CIR_Settings',            40, NULL,           0),
     ('Vsl_Staff',              50, NULL,           0),
     ('DM_Category',           100, NULL,           0),
     ('DM_Manual',             110, NULL,           0),

@@ -36,6 +36,8 @@ public partial class CIR_Log
     [Unicode(false)]
     public string? UserName { get; set; }
 
+    // The office table has no Fleet_CrewId column (only the ship keeps it), so EF must not write it.
+    [NotMapped]
     public long? Fleet_CrewId { get; set; }
 
     [StringLength(50)]
