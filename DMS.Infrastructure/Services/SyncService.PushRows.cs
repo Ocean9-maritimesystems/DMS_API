@@ -91,6 +91,21 @@ public partial class SyncService
         var entityType = _general.Model.FindEntityType(PushableEntities[table])
                          ?? throw new InvalidOperationException($"{table} is not mapped in GeneralContext.");
 
+        // Removed on board: removed here too when it is this vessel's record. Records the office owns once stored
+        // (InsertOnlyTables) stay, and one the office never had needs nothing.
+        if (string.Equals(row.Action, "D", StringComparison.OrdinalIgnoreCase))
+        {
+            if (InsertOnlyTables.Contains(table)) return null;
+            var gone = await _general.FindAsync(entityType.ClrType, row.Key);
+            if (gone == null) return null;
+            var goneEntry = _general.Entry(gone);
+            if ((goneEntry.Property("Origin").CurrentValue as string) != "VSL" || (int)goneEntry.Property("VesselID").CurrentValue! != vesselId)
+                return $"{table} {row.Key} is not this vessel's record at the office.";
+            goneEntry.State = EntityState.Deleted;
+            await _general.SaveChangesAsync();
+            return null;
+        }
+
         // Column name -> property, from the EF model.
         var storeObject = StoreObjectIdentifier.Table(entityType.GetTableName()!, entityType.GetSchema());
         var properties = entityType.GetProperties()
@@ -102,7 +117,7 @@ public partial class SyncService
         var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, element) in row.Row)
         {
-            if (!properties.TryGetValue(name, out var property)) continue; // ship-only columns such as IsPendingUpload
+            if (!properties.TryGetValue(name, out var property)) continue; // columns only the ship has
             values[property.Name] = FromJson(element, property.ClrType);
         }
         values[properties[keyColumn].Name] = row.Key;

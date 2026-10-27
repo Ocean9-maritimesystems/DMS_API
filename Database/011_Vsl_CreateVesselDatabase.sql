@@ -14,14 +14,10 @@
                        VesselID = -1          (records for all vessels)
                        VesselID = @VesselID   (records for this vessel, its template copies included)
                    A table without a VesselID column is copied whole.
-     3. Ship parts what DMS.Vessel.Api needs on top of the office tables: IsPendingUpload on the tables written on
-                   board, V_Vessel.TableIDstart, Vsl_Staff.Fleet_CrewID (= office Vsl_StaffID) and a Password column
-                   wide enough for a hash, the SyncState / SyncLog / SyncDownload tables, TableID_Setup and
-                   Proc_NextID, and the EF migration history (so "dotnet ef database update" adds nothing twice).
-                   Then the ship schema, the same steps as DMS.Vessel.Api ShipSchema.cs: the new feature tables and
-                   columns when the office did not send them, the folder columns (no Scope / OwnerUserID / ViewRoles /
-                   EditRoles), and the app's stored procedures Ship_GetPending, Ship_ColumnIsIdentity and
-                   Ship_ApplyRowChange. The vessel API repeats these at every start, so the two never disagree.
+     3. Ship parts Proc_NextID (so IDs on board come from this vessel's range). Everything else the ship app needs
+                   - its tables, columns and procedures, and the change log (Ship_SyncTable, Ship_ChangeLog and the
+                   TR_<table>_ShipLog triggers) that records what waits to go to the office - is made by
+                   DMS.Vessel.Api (ShipSchema.cs) when it starts on the new database.
      4. Sync       this vessel's waiting rows in Sync_ChangeLog up to now are marked downloaded: the new database
                    already holds those records. Changes made while the copy runs stay waiting and arrive by sync.
 
@@ -186,38 +182,9 @@ SET @rows = @@ROWCOUNT;';
     CLOSE t; DEALLOCATE t;
 
     /* ---- 3. What the ship app needs on top of the office tables ------------------------------------------ */
-    SET @sql = N'
--- Written on board and not at the office yet.
-IF OBJECT_ID(N''dbo.DM_Manual_UserAck'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.DM_Manual_UserAck'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.DM_Manual_UserAck ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_DM_Manual_UserAck_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.CIR_UserAck'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.CIR_UserAck'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.CIR_UserAck ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_CIR_UserAck_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.OtherDocumentMaster'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocumentMaster'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.OtherDocumentMaster ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocumentMaster_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.OtherDocument_Blob'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocument_Blob'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.OtherDocument_Blob ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocument_Blob_IsPendingUpload DEFAULT (0);
--- New feature tables (012_NewFeatures.sql) written on board. The ship migration 20261016120000_NewFeatures is left
--- to run when the ship app starts: it only adds what is still missing.
-IF OBJECT_ID(N''dbo.DMS_InboxRead'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.DMS_InboxRead'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.DMS_InboxRead ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_DMS_InboxRead_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.SUG_Master'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.SUG_Master'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.SUG_Master ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_SUG_Master_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.SUG_Log'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.SUG_Log'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.SUG_Log ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_SUG_Log_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.SUG_Blob'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.SUG_Blob'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.SUG_Blob ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_SUG_Blob_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.OtherDocument_Folder'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocument_Folder'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.OtherDocument_Folder ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocument_Folder_IsPendingUpload DEFAULT (0);
-IF OBJECT_ID(N''dbo.OtherDocument_Log'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocument_Log'', N''IsPendingUpload'') IS NULL
-    ALTER TABLE dbo.OtherDocument_Log ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocument_Log_IsPendingUpload DEFAULT (0);
-';
-    EXEC @exec @sql;
-
-    -- Documents filed in folders: the folder, and a folder move made on board that is not at the office yet.
-    SET @sql = N'
-IF COL_LENGTH(''dbo.OtherDocumentMaster'', ''FolderPendingUpload'') IS NULL
-    ALTER TABLE dbo.OtherDocumentMaster ADD FolderPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocumentMaster_FolderPendingUpload DEFAULT (0);';
-    EXEC @exec @sql;
+    -- What changes on board and waits to go to the office is recorded by the vessel API itself: at every start
+    -- (ShipSchema.cs) it creates Ship_SyncTable / Ship_ChangeLog and the TR_<table>_ShipLog triggers. Nothing is
+    -- added to the office tables here for that (there is no IsPendingUpload / FolderPendingUpload any more).
 
     -- Proc_NextID: the same procedure as here, so IDs on board come from this vessel's range.
     SET @proc = OBJECT_DEFINITION(OBJECT_ID('dbo.Proc_NextID'));

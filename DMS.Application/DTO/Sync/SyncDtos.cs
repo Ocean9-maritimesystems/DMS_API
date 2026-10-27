@@ -364,6 +364,8 @@ public class SyncPushRow
 {
     public string TableName { get; set; } = string.Empty;
     public long Key { get; set; }
+    /// <summary>"U" (default): add or update the record from Row. "D": the record was removed on board (Row is empty).</summary>
+    public string Action { get; set; } = "U";
     /// <summary>Every column of the record (file contents as base64).</summary>
     public Dictionary<string, System.Text.Json.JsonElement> Row { get; set; } = new();
 }
@@ -377,7 +379,7 @@ public class SyncPushRowResult
 {
     public string TableName { get; set; } = string.Empty;
     public long Key { get; set; }
-    /// <summary>The office holds the record (stored now or before): the ship clears IsPendingUpload.</summary>
+    /// <summary>The office holds the record (stored now or before): the ship stops sending it (Ship_ChangeLog).</summary>
     public bool Stored { get; set; }
     public string? Error { get; set; }
 }
