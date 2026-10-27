@@ -16,7 +16,7 @@ public partial class OtherDocumentsContext : DbContext
 
     public virtual DbSet<OtherDocumentMaster> OtherDocumentMaster { get; set; } = null!;
 
-    public virtual DbSet<FldFolder> FldFolders { get; set; } = null!;
+    public virtual DbSet<OtherDocument_Folder> OtherDocument_Folder { get; set; } = null!;
 
     public virtual DbSet<OtherDocument_Blob> OtherDocument_Blob { get; set; } = null!;
 
@@ -59,7 +59,7 @@ public partial class OtherDocumentsContext : DbContext
             entity.Property(e => e.UploadedBy).HasMaxLength(150).HasDefaultValue("");
         });
 
-        modelBuilder.Entity<FldFolder>(entity =>
+        modelBuilder.Entity<OtherDocument_Folder>(entity =>
         {
             entity.HasKey(e => e.OtherDocument_FolderID).HasName("PK_OtherDocument_Folder");
             entity.Property(e => e.OtherDocument_FolderID).ValueGeneratedNever();

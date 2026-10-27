@@ -4,7 +4,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 namespace DMS.Data.EF.Models.OtherDocument;
 
 [Table("OtherDocument_Folder")]
-public sealed class FldFolder
+public sealed class OtherDocument_Folder
 {
     [Key]
     [DatabaseGenerated(DatabaseGeneratedOption.None)]
@@ -14,10 +14,6 @@ public sealed class FldFolder
     public int VesselID { get; set; }
     public long? ParentID { get; set; }
     public string FolderName { get; set; } = null!;
-    public string Scope { get; set; } = null!;
-    public string? OwnerUserID { get; set; }
-    public string? ViewRoles { get; set; }
-    public string? EditRoles { get; set; }
     public int? SortOrder { get; set; }
     public string? CreatedBy { get; set; }
     public DateTime? CreatedOn { get; set; }

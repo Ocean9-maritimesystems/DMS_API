@@ -36,7 +36,7 @@ public partial class SyncService
         ["SUG_Master"] = typeof(SugMaster),
         ["SUG_Log"] = typeof(SugLog),
         ["SUG_Blob"] = typeof(SugBlob),
-        ["OtherDocument_Folder"] = typeof(FldFolder),
+        ["OtherDocument_Folder"] = typeof(OtherDocument_Folder),
         ["OtherDocument_Log"] = typeof(OtherDocument_Log),
     };
 
@@ -109,8 +109,6 @@ public partial class SyncService
         values[properties["Origin"].Name] = "VSL";
         values[properties["VesselID"].Name] = vesselId;
 
-        if (table == "OtherDocument_Folder" && string.Equals(values.GetValueOrDefault(nameof(FldFolder.Scope)) as string, "Personal", StringComparison.OrdinalIgnoreCase))
-            return "Personal folders stay on board.";
 
         var existing = await _general.FindAsync(entityType.ClrType, row.Key);
         if (existing != null)

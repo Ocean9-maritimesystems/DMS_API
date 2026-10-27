@@ -175,55 +175,28 @@ public class OtherDocumentService : IOtherDocumentService
     // ================================================================== Folders
     //
     // Folders for Other Documents (OtherDocument_Folder); a folder holds Other Documents only (OtherDocumentMaster.OtherDocument_FolderID).
-    //   Company    - VesselID -1 (every vessel) or one vessel; synced down; on board ViewRoles / EditRoles (ranks) apply.
-    //   Vessel     - one vessel's own folders (VesselID > 0), made at the office or on board; synced both ways.
-    //   Department - office: VesselID -2, OwnerUserID = the office department; on board: the vessel's department folders.
-    //   Personal   - VesselID -2 at the office, owner only. Personal folders made on board never leave the ship.
-    // A sub-folder takes its scope, vessel and owner from its parent.
-
-    public static readonly string[] FolderScopes = { "Company", "Vessel", "Department", "Personal" };
+    //   VesselID -1  - every vessel; made by an administrator; synced down to every vessel.
+    //   VesselID > 0 - one vessel's folders, made at the office or on board; synced both ways.
+    //   VesselID -2  - office only; never sent to a vessel.
+    // A sub-folder belongs to the same vessel as its parent. Every office user sees every folder.
 
     private sealed class FolderRow : FolderItem
     {
         public string? Origin { get; set; }
         public string? CreatedBy { get; set; }
         public int? SortOrder { get; set; }
-        public bool CanView { get; set; }
     }
 
     private static bool IsAdmin(OfficeUser user) => string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase);
 
-    private static bool InList(string? csv, string? value)
-        => !string.IsNullOrWhiteSpace(value) && !string.IsNullOrWhiteSpace(csv) &&
-           csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-              .Any(r => string.Equals(r, value, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>Who may open / change a folder, from the office.</summary>
+    /// <summary>
+    /// Who may change a folder (add documents and sub-folders, rename, move, delete): an administrator, anyone for a
+    /// vessel's folders, and whoever made it for the office's own folders.
+    /// </summary>
     private static T Rights<T>(T f, OfficeUser user) where T : FolderItem
     {
-        switch (f.Scope)
-        {
-            case "Personal":
-                if (f is FolderRow fr1)
-                    fr1.CanView = fr1.CanEdit = fr1.VesselID == SqlDb.OfficeOnly && fr1.OwnerUserID == user.UserId;
-                break;
-            case "Department" when f.VesselID == SqlDb.OfficeOnly:
-                if (f is FolderRow fr2)
-                {
-                    fr2.CanView = IsAdmin(user) || string.Equals(fr2.OwnerUserID, user.Dept, StringComparison.OrdinalIgnoreCase);
-                    fr2.CanEdit = fr2.CanView;
-                }
-                break;
-            default: // Company, Vessel, and a vessel's department folders: every office user may look
-                if (f is FolderRow fr3)
-                {
-                    fr3.CanView = true;
-                    // A vessel's folders: every office user may file documents in them (office documents stay at the office).
-                    fr3.CanEdit = IsAdmin(user) || fr3.Scope == "Vessel"
-                                  || (fr3.Origin == SqlDb.Office && (fr3.CreatedBy == user.UserId || InList(fr3.EditRoles, user.Role)));
-                }
-                break;
-        }
+        if (f is FolderRow row)
+            row.CanEdit = IsAdmin(user) || row.VesselID > 0 || (row.Origin == SqlDb.Office && row.CreatedBy == user.UserId);
         return f;
     }
 
@@ -237,17 +210,14 @@ public class OtherDocumentService : IOtherDocumentService
     {
         var rows = await LoadFolderRowsAsync();
         return rows
-            .Where(f => f.Scope is "Company" or "Vessel"
-                || (f.Scope == "Department" && (f.VesselID > 0 || f.OwnerUserID == user.Dept || IsAdmin(user)))
-                || (f.Scope == "Personal" && f.VesselID == SqlDb.OfficeOnly && f.OwnerUserID == user.UserId))
-            .OrderBy(f => f.Scope == "Company" ? 0 : f.Scope == "Vessel" ? 1 : f.Scope == "Department" ? 2 : 3)
+            .OrderBy(f => f.VesselID == SqlDb.AllVessels ? 0 : f.VesselID > 0 ? 1 : 2)   // every vessel, a vessel, office only
             .ThenBy(f => f.SortOrder).ThenBy(f => f.FolderName)
-            .Select(f => Rights(f, user)).Where(f => f.CanView).Cast<FolderItem>().ToList();
+            .Select(f => Rights(f, user)).Cast<FolderItem>().ToList();
     }
 
     private async Task<List<FolderRow>> LoadFolderRowsAsync()
     {
-        var folders = await _dbContext.FldFolders.AsNoTracking().Where(f => f.IsDeleted == 0).ToListAsync();
+        var folders = await _dbContext.OtherDocument_Folder.AsNoTracking().Where(f => f.IsDeleted == 0).ToListAsync();
         var folderIds = folders.Select(f => f.OtherDocument_FolderID).ToList();
         var fileCounts = await _dbContext.OtherDocumentMaster.AsNoTracking()
             .Where(d => d.OtherDocument_FolderID.HasValue && folderIds.Contains(d.OtherDocument_FolderID.Value) && (d.IsDeleted == null || d.IsDeleted != 1))
@@ -258,8 +228,7 @@ public class OtherDocumentService : IOtherDocumentService
         {
             OtherDocument_FolderID = f.OtherDocument_FolderID, Origin = f.Origin, VesselID = f.VesselID,
             VesselName = f.VesselID > 0 ? vessels.GetValueOrDefault(f.VesselID) : f.VesselID == -1 ? "All vessels" : "Office",
-            ParentID = f.ParentID, FolderName = f.FolderName, Scope = f.Scope, OwnerUserID = f.OwnerUserID,
-            ViewRoles = f.ViewRoles, EditRoles = f.EditRoles, CreatedBy = f.CreatedBy,
+            ParentID = f.ParentID, FolderName = f.FolderName, CreatedBy = f.CreatedBy,
             SortOrder = f.SortOrder, FileCount = fileCounts.GetValueOrDefault(f.OtherDocument_FolderID)
         }).ToList();
     }
@@ -285,81 +254,49 @@ public class OtherDocumentService : IOtherDocumentService
             if (current == null) return (null, "Folder not found.");
             if (!current.CanEdit) return (null, "You cannot change this folder.");
 
-            if (parent != null && (parent.Scope != current.Scope || parent.VesselID != current.VesselID))
-                return (null, "A folder can only move under a folder of the same kind and vessel.");
+            if (parent != null && parent.VesselID != current.VesselID)
+                return (null, "A folder can only move under a folder of the same vessel.");
 
             if (parent != null && await IsBelowAsync(parent.OtherDocument_FolderID, current.OtherDocument_FolderID))
                 return (null, "A folder cannot move into itself.");
 
-            if (await NameTakenAsync(request.ParentId, name, current.Scope, current.VesselID, current.OwnerUserID, current.OtherDocument_FolderID))
+            if (await NameTakenAsync(request.ParentId, name, current.VesselID, current.OtherDocument_FolderID))
                 return (null, "There is already a folder with this name here.");
 
-            var entity = await _dbContext.FldFolders.FirstAsync(f => f.OtherDocument_FolderID == current.OtherDocument_FolderID);
+            var entity = await _dbContext.OtherDocument_Folder.FirstAsync(f => f.OtherDocument_FolderID == current.OtherDocument_FolderID);
             entity.FolderName = name;
             entity.ParentID = request.ParentId;
-            entity.ViewRoles = Roles(request.ViewRoles);
-            entity.EditRoles = Roles(request.EditRoles);
             await _dbContext.SaveChangesAsync();
             return (current.OtherDocument_FolderID, null);
         }
 
-        string scope;
         int vesselId;
-        string? owner;
         if (parent != null)
+            vesselId = parent.VesselID;
+        else if (request.VesselId is > 0)
         {
-            (scope, vesselId, owner) = (parent.Scope, parent.VesselID, parent.OwnerUserID);
+            vesselId = request.VesselId.Value;
+            if (!await VesselExistsAsync(vesselId)) return (null, "Vessel not found.");
+        }
+        else if (request.VesselId == SqlDb.AllVessels)
+        {
+            if (!IsAdmin(user)) return (null, "Only an administrator can add folders for every vessel.");
+            vesselId = SqlDb.AllVessels;
         }
         else
-        {
-            scope = FolderScopes.FirstOrDefault(s => string.Equals(s, request.Scope, StringComparison.OrdinalIgnoreCase)) ?? "";
-            switch (scope)
-            {
-                case "Company":
-                    if (!IsAdmin(user)) return (null, "Only an administrator can add company folders.");
+            vesselId = SqlDb.OfficeOnly;
 
-                    vesselId = request.VesselId is > 0 ? request.VesselId.Value : SqlDb.AllVessels;
-                    owner = null;
-                    break;
-                case "Vessel":
-                    if (request.VesselId is not > 0) return (null, "Choose the vessel.");
-
-                    vesselId = request.VesselId.Value;
-                    owner = null;
-                    break;
-                case "Department":
-                    if (string.IsNullOrWhiteSpace(user.Dept)) return (null, "Your user has no department.");
-
-                    vesselId = SqlDb.OfficeOnly;
-                    owner = user.Dept;
-                    break;
-                case "Personal":
-                    vesselId = SqlDb.OfficeOnly;
-                    owner = user.UserId;
-                    break;
-                default:
-                    return (null, "Scope must be Company, Vessel, Department or Personal.");
-            }
-
-            if (vesselId > 0 && !await VesselExistsAsync(vesselId))
-                return (null, "Vessel not found.");
-        }
-
-        if (await NameTakenAsync(request.ParentId, name, scope, vesselId, owner, null))
+        if (await NameTakenAsync(request.ParentId, name, vesselId, null))
             return (null, "There is already a folder with this name here.");
 
         var id = await _db.NextIdAsync("OtherDocument_Folder");
-        _dbContext.FldFolders.Add(new FldFolder
+        _dbContext.OtherDocument_Folder.Add(new OtherDocument_Folder
         {
             OtherDocument_FolderID = id,
             Origin = SqlDb.Office,
             VesselID = vesselId,
             ParentID = request.ParentId,
             FolderName = name,
-            Scope = scope,
-            OwnerUserID = owner,
-            ViewRoles = Roles(request.ViewRoles),
-            EditRoles = Roles(request.EditRoles),
             SortOrder = null,
             CreatedBy = user.UserId,
             CreatedOn = DateTime.UtcNow,
@@ -374,10 +311,10 @@ public class OtherDocumentService : IOtherDocumentService
         var f = await FolderAsync(folderId, user);
         if (f == null) return "Folder not found.";
         if (!f.CanEdit) return "You cannot delete this folder.";
-        if (await _dbContext.FldFolders.AnyAsync(x => x.ParentID == folderId && x.IsDeleted == 0))
+        if (await _dbContext.OtherDocument_Folder.AnyAsync(x => x.ParentID == folderId && x.IsDeleted == 0))
             return "Delete or move the sub-folders first.";
         if (f.FileCount > 0) return "Move or delete the documents in it first.";
-        await _dbContext.FldFolders.Where(x => x.OtherDocument_FolderID == folderId)
+        await _dbContext.OtherDocument_Folder.Where(x => x.OtherDocument_FolderID == folderId)
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.IsDeleted, 1));
         return null;
     }
@@ -392,8 +329,7 @@ public class OtherDocumentService : IOtherDocumentService
     {
         if (folderId != null)
         {
-            var folder = await FolderAsync(folderId.Value, user);
-            if (folder is not { CanView: true }) return new List<FolderDocument>();
+            if (await FolderAsync(folderId.Value, user) == null) return new List<FolderDocument>();
             var documents = await _dbContext.OtherDocumentMaster.AsNoTracking()
                 .Where(d => (d.IsDeleted == null || d.IsDeleted != 1) && d.OtherDocument_FolderID == folderId)
                 .ToListAsync();
@@ -405,17 +341,16 @@ public class OtherDocumentService : IOtherDocumentService
         return await ProjectDocumentsAsync(unfiled, vesselId, orderByType: false);
     }
 
-    /// <summary>Every document under a vessel, in any folder or none, without those in folders this user may not open.</summary>
+    /// <summary>Every document under a vessel, in any folder or none.</summary>
     public async Task<List<FolderDocument>> GetVesselDocumentsAsync(int vesselId, OfficeUser user)
     {
-        var visible = (await GetFolderTreeAsync(user)).Select(f => f.OtherDocument_FolderID).ToHashSet();
         var entities = await _dbContext.OtherDocumentMaster.AsNoTracking()
             .Where(d => (d.IsDeleted == null || d.IsDeleted != 1) && (d.VesselID == vesselId || d.VesselID == -1))
             .ToListAsync();
         var docs = await ProjectDocumentsAsync(entities, vesselId, orderByType: false);
         foreach (var d in docs)
             if (d.OtherDocument_FolderID != null && d.FolderName == null) d.OtherDocument_FolderID = null; // its folder was deleted
-        return docs.Where(d => d.OtherDocument_FolderID == null || visible.Contains(d.OtherDocument_FolderID.Value)).ToList();
+        return docs;
     }
 
     private async Task<List<FolderDocument>> ProjectDocumentsAsync(List<OtherDocumentMaster> entities, int? vesselId, bool orderByType)
@@ -426,7 +361,7 @@ public class OtherDocumentService : IOtherDocumentService
         var typeIds = entities.Where(d => d.OtherDocument_TypeID.HasValue).Select(d => d.OtherDocument_TypeID!.Value).Distinct().ToList();
         var folderIds = entities.Where(d => d.OtherDocument_FolderID.HasValue).Select(d => d.OtherDocument_FolderID!.Value).Distinct().ToList();
         var types = await _dbContext.OtherDocument_Type.AsNoTracking().Where(t => typeIds.Contains(t.OtherDocument_TypeID)).ToDictionaryAsync(t => t.OtherDocument_TypeID);
-        var folders = await _dbContext.FldFolders.AsNoTracking().Where(f => folderIds.Contains(f.OtherDocument_FolderID) && f.IsDeleted == 0).ToDictionaryAsync(f => f.OtherDocument_FolderID);
+        var folders = await _dbContext.OtherDocument_Folder.AsNoTracking().Where(f => folderIds.Contains(f.OtherDocument_FolderID) && f.IsDeleted == 0).ToDictionaryAsync(f => f.OtherDocument_FolderID);
         var vesselNames = await _generalContext.VVessels.AsNoTracking().ToDictionaryAsync(v => v.VesselID, v => v.VslName);
         var documentIds = entities.Select(d => d.OtherDocumentMasterID).ToList();
         var blobs = await _dbContext.OtherDocument_Blob.AsNoTracking().Where(b => documentIds.Contains(b.OtherDocumentMasterID)).GroupBy(b => b.OtherDocumentMasterID).ToDictionaryAsync(g => g.Key, g => new { Count = g.Count(), First = g.Min(b => b.OtherDocument_BlobID) });
@@ -673,7 +608,7 @@ public class OtherDocumentService : IOtherDocumentService
     /// <summary>True when folderId is ancestorId or lies somewhere below it (deleted folders count, as before).</summary>
     private async Task<bool> IsBelowAsync(long folderId, long ancestorId)
     {
-        var parents = await _dbContext.FldFolders.AsNoTracking()
+        var parents = await _dbContext.OtherDocument_Folder.AsNoTracking()
             .Select(f => new { f.OtherDocument_FolderID, f.ParentID })
             .ToDictionaryAsync(f => f.OtherDocument_FolderID, f => f.ParentID);
         long? current = folderId;
@@ -685,10 +620,9 @@ public class OtherDocumentService : IOtherDocumentService
         return false;
     }
 
-    private Task<bool> NameTakenAsync(long? parentId, string name, string scope, int vesselId, string? owner, long? exceptId)
-        => _dbContext.FldFolders.AnyAsync(f => f.IsDeleted == 0 && f.FolderName == name && f.Scope == scope && f.VesselID == vesselId
+    private Task<bool> NameTakenAsync(long? parentId, string name, int vesselId, long? exceptId)
+        => _dbContext.OtherDocument_Folder.AnyAsync(f => f.IsDeleted == 0 && f.FolderName == name && f.VesselID == vesselId
                                                && f.ParentID == parentId
-                                               && f.OwnerUserID == owner
                                                && (exceptId == null || f.OtherDocument_FolderID != exceptId));
 
     private Task<bool> VesselExistsAsync(int vesselId) => _generalContext.VVessels.AnyAsync(v => v.VesselID == vesselId);
@@ -698,13 +632,6 @@ public class OtherDocumentService : IOtherDocumentService
     {
         var mb = int.TryParse(await _db.SettingAsync("DM_Settings", "FLD_MaxFileSizeMB"), out var m) && m > 0 ? m : 25;
         return mb * 1024L * 1024L;
-    }
-
-    private static string? Roles(string? csv)
-    {
-        if (string.IsNullOrWhiteSpace(csv)) return null;
-        var list = string.Join(",", csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase));
-        return list.Length == 0 ? null : list.Length <= 500 ? list : list[..500];
     }
 
     private static string? Cut(string? s, int max) => string.IsNullOrWhiteSpace(s) ? null : s.Trim().Length <= max ? s.Trim() : s.Trim()[..max];

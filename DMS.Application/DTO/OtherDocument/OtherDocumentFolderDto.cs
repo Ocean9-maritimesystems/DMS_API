@@ -9,16 +9,16 @@ public class FolderItem
     public string? VesselName { get; set; }
     public long? ParentID { get; set; }
     public string FolderName { get; set; } = "";
-    public string Scope { get; set; } = "";
-    public string? OwnerUserID { get; set; }
-    public string? ViewRoles { get; set; }
-    public string? EditRoles { get; set; }
     /// <summary>The Other Documents filed in this folder.</summary>
     public int FileCount { get; set; }
     public bool CanEdit { get; set; }
 }
 
-    public sealed record SaveFolder(long? ParentId, string Name, string Scope, int? VesselId, string? ViewRoles, string? EditRoles);
+    /// <summary>
+    /// A folder to add or change. VesselId (new top-level folder only): a vessel = that vessel's folder; -1 = every vessel
+    /// (administrators); none = office only. A sub-folder belongs to the same vessel as its parent.
+    /// </summary>
+    public sealed record SaveFolder(long? ParentId, string Name, int? VesselId);
 
     /// <summary>An Other Document as shown in a folder (OtherDocumentMaster.OtherDocument_FolderID).</summary>
     public class FolderDocument

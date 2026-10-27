@@ -18,6 +18,10 @@
                    board, V_Vessel.TableIDstart, Vsl_Staff.Fleet_CrewID (= office Vsl_StaffID) and a Password column
                    wide enough for a hash, the SyncState / SyncLog / SyncDownload tables, TableID_Setup and
                    Proc_NextID, and the EF migration history (so "dotnet ef database update" adds nothing twice).
+                   Then the ship schema, the same steps as DMS.Vessel.Api ShipSchema.cs: the new feature tables and
+                   columns when the office did not send them, the folder columns (no Scope / OwnerUserID / ViewRoles /
+                   EditRoles), and the app's stored procedures Ship_GetPending, Ship_ColumnIsIdentity and
+                   Ship_ApplyRowChange. The vessel API repeats these at every start, so the two never disagree.
      4. Sync       this vessel's waiting rows in Sync_ChangeLog up to now are marked downloaded: the new database
                    already holds those records. Changes made while the copy runs stay waiting and arrive by sync.
 
@@ -55,12 +59,14 @@ BEGIN
     /* ---- Checks ---------------------------------------------------------------------------------------- */
     IF NOT EXISTS (SELECT 1 FROM dbo.V_Vessel WHERE VesselID = @VesselID)
     BEGIN RAISERROR('Vessel %d is not in V_Vessel.', 16, 1, @VesselID); RETURN; END;
+
     IF COL_LENGTH('dbo.TableID_Setup', 'IsForVsl') IS NULL
     BEGIN RAISERROR('dbo.TableID_Setup has no IsForVsl column.', 16, 1); RETURN; END;
 
     SET @DatabaseName = ISNULL(NULLIF(LTRIM(RTRIM(@DatabaseName)), N''), N'DMS_Vessel_' + CAST(@VesselID AS nvarchar(20)));
     IF @DatabaseName = DB_NAME()
     BEGIN RAISERROR('The vessel database cannot have the same name as this (office) database.', 16, 1); RETURN; END;
+    
     SET @db = QUOTENAME(@DatabaseName);
     SET @exec = @db + N'.sys.sp_executesql';
 
@@ -69,7 +75,8 @@ BEGIN
     SET @sql = N'SELECT DISTINCT CAST(TableName AS sysname) FROM dbo.TableID_Setup
                   WHERE IsForVsl = 1 AND OBJECT_ID(N''dbo.'' + QUOTENAME(TableName), N''U'') IS NOT NULL';
     INSERT @tables (TableName) EXEC sp_executesql @sql;
-    IF NOT EXISTS (SELECT 1 FROM @tables)
+   
+   IF NOT EXISTS (SELECT 1 FROM @tables)
     BEGIN RAISERROR('No table in dbo.TableID_Setup has IsForVsl = 1.', 16, 1); RETURN; END;
 
     /* ---- 0. The vessel's own copy of the template records (VesselID = -9) --------------------------------- */
@@ -88,9 +95,11 @@ BEGIN
     BEGIN
         IF @DropExisting = 0
         BEGIN RAISERROR('Database %s already exists. Use @DropExisting = 1 to replace it.', 16, 1, @DatabaseName); RETURN; END;
+
         SET @sql = N'ALTER DATABASE ' + @db + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE ' + @db + N';';
         EXEC sp_executesql @sql;
     END;
+
     SET @sql = N'CREATE DATABASE ' + @db + N';';
     EXEC sp_executesql @sql;
     PRINT 'Database ' + @DatabaseName + ' created.';
@@ -199,103 +208,15 @@ IF OBJECT_ID(N''dbo.SUG_Blob'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.SUG_Bl
     ALTER TABLE dbo.SUG_Blob ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_SUG_Blob_IsPendingUpload DEFAULT (0);
 IF OBJECT_ID(N''dbo.OtherDocument_Folder'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocument_Folder'', N''IsPendingUpload'') IS NULL
     ALTER TABLE dbo.OtherDocument_Folder ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocument_Folder_IsPendingUpload DEFAULT (0);
-
--- Start of this vessel''s ID range for Proc_NextID.
-IF OBJECT_ID(N''dbo.V_Vessel'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.V_Vessel'', N''TableIDstart'') IS NULL
-    ALTER TABLE dbo.V_Vessel ADD TableIDstart bigint NULL;
-
--- Crew: the ship keeps the office Vsl_StaffID in Fleet_CrewID too. Passwords are copied as the office holds them
--- (plain text); the column is only widened so it can also hold a hash if the vessel app stores one later.
-IF OBJECT_ID(N''dbo.Vsl_Staff'', N''U'') IS NOT NULL
-BEGIN
-    IF COL_LENGTH(N''dbo.Vsl_Staff'', N''Fleet_CrewID'') IS NULL
-        ALTER TABLE dbo.Vsl_Staff ADD Fleet_CrewID bigint NULL;
-    IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N''dbo.Vsl_Staff'') AND name = N''Password''
-                  AND max_length BETWEEN 0 AND 499 AND TYPE_NAME(system_type_id) = N''varchar'')
-        ALTER TABLE dbo.Vsl_Staff ALTER COLUMN Password varchar(500) NULL;
-    IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N''dbo.Vsl_Staff'') AND name = N''Password''
-                  AND max_length BETWEEN 0 AND 999 AND TYPE_NAME(system_type_id) = N''nvarchar'')
-        ALTER TABLE dbo.Vsl_Staff ALTER COLUMN Password nvarchar(500) NULL;
-END;';
+IF OBJECT_ID(N''dbo.OtherDocument_Log'', N''U'') IS NOT NULL AND COL_LENGTH(N''dbo.OtherDocument_Log'', N''IsPendingUpload'') IS NULL
+    ALTER TABLE dbo.OtherDocument_Log ADD IsPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocument_Log_IsPendingUpload DEFAULT (0);
+';
     EXEC @exec @sql;
 
-    -- Fleet_CrewID = the office key (in its own batch: the column may have been added just now).
-    SET @sql = N'IF OBJECT_ID(N''dbo.Vsl_Staff'', N''U'') IS NOT NULL
-    UPDATE dbo.Vsl_Staff SET Fleet_CrewID = Vsl_StaffID WHERE Fleet_CrewID IS NULL;';
-    EXEC @exec @sql;
-
-    -- Ship-only tables (as DMS.Vessel.Api expects them).
+    -- Documents filed in folders: the folder, and a folder move made on board that is not at the office yet.
     SET @sql = N'
-IF OBJECT_ID(N''dbo.SyncState'', N''U'') IS NULL
-BEGIN
-    CREATE TABLE dbo.SyncState
-    (
-        Id                  int IDENTITY(1,1) NOT NULL CONSTRAINT PK_SyncState PRIMARY KEY,
-        LastPulledAtUtc     datetime2         NOT NULL,
-        LastSyncAttemptUtc  datetime2         NULL,
-        LastSyncSucceeded   bit               NOT NULL,
-        LastError           nvarchar(500)     NULL
-    );
-    SET IDENTITY_INSERT dbo.SyncState ON;
-    INSERT dbo.SyncState (Id, LastPulledAtUtc, LastSyncAttemptUtc, LastSyncSucceeded, LastError)
-    VALUES (1, SYSUTCDATETIME(), NULL, 0, NULL);
-    SET IDENTITY_INSERT dbo.SyncState OFF;
-END;
-IF OBJECT_ID(N''dbo.SyncLog'', N''U'') IS NULL
-    CREATE TABLE dbo.SyncLog
-    (
-        Id               bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_SyncLog PRIMARY KEY,
-        StartedUtc       datetime2      NOT NULL,
-        FinishedUtc      datetime2      NULL,
-        [Trigger]        nvarchar(20)   NOT NULL,
-        AcksSent         int            NOT NULL,
-        Received         int            NOT NULL,
-        Removed          int            NOT NULL,
-        FilesDownloaded  int            NOT NULL,
-        Status           nvarchar(20)   NOT NULL,
-        Error            nvarchar(500)  NULL
-    );
-IF OBJECT_ID(N''dbo.SyncDownload'', N''U'') IS NULL
-BEGIN
-    CREATE TABLE dbo.SyncDownload
-    (
-        Id                 bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_SyncDownload PRIMARY KEY,
-        SyncOutboxId       bigint        NOT NULL,
-        ItemType           nvarchar(20)  NOT NULL,
-        ItemId             bigint        NOT NULL,
-        Action             nvarchar(1)   NOT NULL,
-        ChangedUtc         datetime2     NOT NULL,
-        PullServerTimeUtc  datetime2     NOT NULL,
-        DownloadedUtc      datetime2     NOT NULL,
-        ConfirmedUtc       datetime2     NULL
-    );
-    CREATE UNIQUE INDEX IX_SyncDownload_SyncOutboxId ON dbo.SyncDownload (SyncOutboxId);
-    CREATE INDEX IX_SyncDownload_ConfirmedUtc ON dbo.SyncDownload (ConfirmedUtc);
-END;
-IF OBJECT_ID(N''dbo.TableID_Setup'', N''U'') IS NULL
-BEGIN
-    CREATE TABLE dbo.TableID_Setup
-    (
-        TableID_SetupID bigint      NOT NULL CONSTRAINT PK_TableID_Setup PRIMARY KEY,
-        TableName       varchar(50) NOT NULL,
-        VesselID        int         NOT NULL,
-        LastNumber      bigint      NOT NULL,
-        Origin          varchar(3)  NULL      -- VSL (this vessel) / HQ; Proc_NextID reads the row by TableName + Origin + VesselID
-    );
-    CREATE UNIQUE INDEX IX_TableID_Setup_Table_Vessel ON dbo.TableID_Setup (TableName, VesselID);
-END;
-IF COL_LENGTH(N''dbo.TableID_Setup'', N''Origin'') IS NULL
-    ALTER TABLE dbo.TableID_Setup ADD Origin varchar(3) NULL;
-IF OBJECT_ID(N''dbo.__EFMigrationsHistory'', N''U'') IS NULL
-    CREATE TABLE dbo.__EFMigrationsHistory
-    (
-        MigrationId     nvarchar(150) NOT NULL CONSTRAINT PK___EFMigrationsHistory PRIMARY KEY,
-        ProductVersion  nvarchar(32)  NOT NULL
-    );
-INSERT dbo.__EFMigrationsHistory (MigrationId, ProductVersion)
-SELECT m.MigrationId, N''8.0.8''
-  FROM (VALUES (N''20261013180000_OtherDocuments''), (N''20261015120000_TableIdSetup''), (N''20261016100000_AddPendingUploadFlags'')) m (MigrationId)
- WHERE NOT EXISTS (SELECT 1 FROM dbo.__EFMigrationsHistory h WHERE h.MigrationId = m.MigrationId);';
+IF COL_LENGTH(''dbo.OtherDocumentMaster'', ''FolderPendingUpload'') IS NULL
+    ALTER TABLE dbo.OtherDocumentMaster ADD FolderPendingUpload bit NOT NULL CONSTRAINT DF_OtherDocumentMaster_FolderPendingUpload DEFAULT (0);';
     EXEC @exec @sql;
 
     -- Proc_NextID: the same procedure as here, so IDs on board come from this vessel's range.
@@ -308,7 +229,7 @@ SELECT m.MigrationId, N''8.0.8''
     -- Tables the ship app reads that were not in the IsForVsl list.
     DECLARE @missing nvarchar(max);
     SELECT @missing = STRING_AGG(n.TableName, N', ')
-      FROM (VALUES (N'V_Vessel'), (N'DM_Status'), (N'DM_Settings'), (N'CIR_Setting'), (N'Vsl_Staff'), (N'DM_Category'),
+      FROM (VALUES (N'V_Vessel'), (N'DM_Status'), (N'DM_Settings'), (N'CIR_Settings'), (N'Vsl_Staff'), (N'DM_Category'),
                    (N'DM_Manual'), (N'DM_ManualVersion'), (N'DM_Manual_Attachments'), (N'DM_Manual_ToAck_Vsl'),
                    (N'DM_Manual_UserAck'), (N'CIR_Category'), (N'CIR_Master'), (N'CIR_Blob'), (N'CIR_ToAck_Vsl'),
                    (N'CIR_UserAck'), (N'OtherDocument_Type'), (N'OtherDocumentMaster'), (N'OtherDocument_Blob')) n (TableName)

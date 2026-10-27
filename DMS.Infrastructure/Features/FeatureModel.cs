@@ -22,7 +22,7 @@ public partial class GeneralContext
     public virtual DbSet<SyncFullCopyItem> SyncFullCopyItems { get; set; } = null!;
     public virtual DbSet<SyncChangeLog> SyncChangeLogs { get; set; } = null!;
     /// <summary>Also mapped here so the vessel push (api/Sync/PushRows) can store folders with the other feature rows.</summary>
-    public virtual DbSet<DMS.Data.EF.Models.OtherDocument.FldFolder> OtherDocumentFolders { get; set; } = null!;
+    public virtual DbSet<DMS.Data.EF.Models.OtherDocument.OtherDocument_Folder> OtherDocumentFolders { get; set; } = null!;
     /// <summary>Also mapped here so the vessel push can store the document log rows written on board.</summary>
     public virtual DbSet<DMS.Data.EF.Models.OtherDocument.OtherDocument_Log> OtherDocumentLogs { get; set; } = null!;
 }
