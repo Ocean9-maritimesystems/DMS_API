@@ -212,6 +212,9 @@ SET @rows = @@ROWCOUNT;';
         PRINT CAST(@@ROWCOUNT AS varchar(20)) + ' waiting sync row(s) for vessel ' + CAST(@VesselID AS varchar(10)) + ' marked downloaded.';
     END;
 
+    /* --------- 5 Create trigger ---------------------------------------------------- */
+    EXEC @exec 'Ship_CreateLogTriggers';
+
     PRINT 'Vessel database ' + @DatabaseName + ' is ready for vessel ' + CAST(@VesselID AS varchar(10)) + '.';
 END
 GO

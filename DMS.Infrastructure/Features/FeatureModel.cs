@@ -15,7 +15,7 @@ public partial class GeneralContext
     public virtual DbSet<CirManualLink> CirManualLinks { get; set; } = null!;
     public virtual DbSet<BlobTableSettingRow> BlobTableSettings { get; set; } = null!;
     public virtual DbSet<SyncVessel> SyncVessels { get; set; } = null!;
-    public virtual DbSet<SyncLog> SyncLogs { get; set; } = null!;
+    public virtual DbSet<Sync_Log> Sync_Logs { get; set; } = null!;
     public virtual DbSet<SyncVesselKey> SyncVesselKeys { get; set; } = null!;
     public virtual DbSet<SyncVesselItem> SyncVesselItems { get; set; } = null!;
     public virtual DbSet<SyncOutbox> SyncOutbox { get; set; } = null!;

@@ -14,19 +14,6 @@ public interface ISyncService
     /// <summary>Checks the X-Vessel-Key sent by a vessel against Sync_VesselKey.</summary>
     Task<bool> ValidateVesselKeyAsync(int vesselId, string key);
 
-    /// <summary>
-    /// What this vessel has not received yet: new or changed items, removals, and the crew and
-    /// category lists when they changed. Items sent in the previous pull (the one "since" refers to)
-    /// are marked as received first.
-    /// </summary>
-    Task<SyncPullResponse> PullAsync(int vesselId, DateTime since);
-
-    /// <summary>
-    /// Called by the vessel after applying a pull: sets the DownloadedUtc marker on the change-table rows it
-    /// downloaded, and confirms everything that pull sent as on board. Safe to repeat.
-    /// </summary>
-    Task<SyncConfirmResult> ConfirmAsync(SyncConfirmRequest request);
-
     /// <summary>Stores acknowledgements made on board. Safe to repeat: an acknowledgement already stored is skipped.</summary>
     Task<SyncPushResult> PushAsync(SyncPushRequest request);
 

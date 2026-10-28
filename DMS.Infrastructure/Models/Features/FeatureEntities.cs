@@ -161,9 +161,9 @@ public class SyncVessel
 }
 
 [Table("Sync_Log")]
-public class SyncLog
+public class Sync_Log
 {
-    [Key, DatabaseGenerated(DatabaseGeneratedOption.Identity)] public long SyncLogID { get; set; }
+    [Key, DatabaseGenerated(DatabaseGeneratedOption.Identity)] public long Sync_LogID { get; set; }
     public int VesselID { get; set; }
     [StringLength(10)] public string Direction { get; set; } = "";
     [Column(TypeName = "datetime2(3)")] public DateTime StartedUtc { get; set; }
@@ -182,19 +182,6 @@ public class SyncVesselKey
     [Column(TypeName = "datetime2(3)")] public DateTime CreatedUtc { get; set; }
     [StringLength(150)] public string? CreatedBy { get; set; }
     [Column(TypeName = "datetime2(3)")] public DateTime? LastUsedUtc { get; set; }
-}
-
-[Table("Sync_VesselItem")]
-[PrimaryKey(nameof(VesselID), nameof(ItemType), nameof(ItemID))]
-public class SyncVesselItem
-{
-    public int VesselID { get; set; }
-    [StringLength(20)] public string ItemType { get; set; } = "";
-    public long ItemID { get; set; }
-    [Column(TypeName = "char(64)")] public string? PendingKey { get; set; }
-    [Column(TypeName = "datetime2(3)")] public DateTime? PendingUtc { get; set; }
-    [Column(TypeName = "char(64)")] public string? ConfirmedKey { get; set; }
-    [Column(TypeName = "datetime2(3)")] public DateTime? ConfirmedUtc { get; set; }
 }
 
 [Table("Sync_Outbox")]

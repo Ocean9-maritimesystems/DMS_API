@@ -27,18 +27,6 @@ public class SyncController : ControllerBase
 
     private int VesselId => VesselKeyAttribute.VesselIdOf(HttpContext);
 
-    /// <summary>GET api/Sync/Pull?vesselId=101&amp;since=2026-09-01T00:00:00Z</summary>
-    [HttpGet("Pull")]
-    public async Task<ActionResult<SyncPullResponse>> Pull(int vesselId, DateTime? since)
-    {
-        var result = await _service.PullAsync(VesselId, since ?? DateTime.MinValue);
-        _logger.LogInformation(
-            "Sync pull for vessel {VesselId}: {Manuals} manual(s), {Circulars} circular(s), {Removed} removal(s), more: {HasMore}",
-            VesselId, result.Manuals.Count, result.Circulars.Count,
-            result.DeletedManualIds.Count + result.DeletedCircularIds.Count, result.HasMore);
-        return Ok(result);
-    }
-
     /// <summary>
     /// GET api/Sync/Changes?max=500: the records changed at the office for this vessel (Sync_ChangeLog), each as it
     /// is now - same table, key and data (file contents are downloaded on board when first opened).
@@ -60,20 +48,6 @@ public class SyncController : ControllerBase
     public async Task<ActionResult<SyncChangesConfirmResult>> ConfirmChanges([FromBody] SyncChangesConfirmRequest request)
     {
         return Ok(await _service.ConfirmChangesAsync(VesselId, request.ChangeIds));
-    }
-
-    /// <summary>
-    /// POST api/Sync/Confirm: the vessel has applied a pull. Marks the change-table rows it downloaded
-    /// (Sync_Outbox.DownloadedUtc) and confirms the items that pull sent.
-    /// </summary>
-    [HttpPost("Confirm")]
-    public async Task<ActionResult<SyncConfirmResult>> Confirm([FromBody] SyncConfirmRequest request)
-    {
-        request.VesselID = VesselId;
-        var result = await _service.ConfirmAsync(request);
-        _logger.LogInformation("Sync confirm from vessel {VesselId}: {Count} change row(s) marked downloaded",
-            VesselId, result.Confirmed);
-        return Ok(result);
     }
 
     /// <summary>POST api/Sync/Push: acknowledgements made on board.</summary>

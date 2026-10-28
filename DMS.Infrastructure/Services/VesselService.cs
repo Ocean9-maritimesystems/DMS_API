@@ -205,14 +205,14 @@ public class VesselService : IVesselService
             result.KeyError = ex.GetBaseException().Message;
         }
 
-        var entries = await _dbContext.SyncLogs.AsNoTracking()
+        var entries = await _dbContext.Sync_Logs.AsNoTracking()
             .Where(l => l.VesselID == vesselId)
-            .OrderByDescending(l => l.StartedUtc).ThenByDescending(l => l.SyncLogID)
+            .OrderByDescending(l => l.StartedUtc).ThenByDescending(l => l.Sync_LogID)
             .Take(200)
             .ToListAsync();
         result.Entries.AddRange(entries.Select(e => new VesselSyncLogDto
         {
-            SyncLogID = e.SyncLogID,
+            SyncLogID = e.Sync_LogID,
             Direction = e.Direction,
             StartedUtc = Utc(e.StartedUtc),
             FinishedUtc = e.FinishedUtc == null ? null : Utc(e.FinishedUtc.Value),
