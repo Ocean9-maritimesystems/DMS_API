@@ -63,4 +63,7 @@ public interface ISyncService
     /// removed), as (ItemType, ItemID) with ItemType "Manual" or "Circular". Empty when the sync tables are not installed.
     /// </summary>
     Task<Dictionary<int, HashSet<(string ItemType, long ItemId)>>> GetQueuedItemsAsync(IReadOnlyCollection<int> vesselIds);
+
+    /// <summary>Per vessel, the number of changes (records of any synced table) waiting for its next sync.</summary>
+    Task<Dictionary<int, int>> GetWaitingChangesAsync(IReadOnlyCollection<int> vesselIds);
 }

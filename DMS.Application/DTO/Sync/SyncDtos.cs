@@ -192,6 +192,8 @@ public class SyncHeartbeatRequest
     /// <summary>Acknowledgements recorded on board and not yet sent to the office.</summary>
     public int PendingManualAcks { get; set; }
     public int PendingCircularAcks { get; set; }
+    /// <summary>Other records made on board and not at the office yet (folders, documents, suggestions, ...).</summary>
+    public int PendingOther { get; set; }
     /// <summary>What the ship is doing, e.g. "Downloading attachments"; null when idle.</summary>
     public string? Activity { get; set; }
     /// <summary>0-100 while busy; null when idle.</summary>

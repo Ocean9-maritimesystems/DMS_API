@@ -1,4 +1,5 @@
-﻿using DMS.Application.DTO.Manuals;
+using DMS.Application.DTO.Manuals;
+using DMS.Data.EF.Models.Features;
 using DMS.Data.EF.Models.Manuals;
 using Microsoft.EntityFrameworkCore;
 
@@ -64,7 +65,12 @@ public partial class DmsContext : DbContext
     public virtual DbSet<VwDmManualVersion> VwDmManualVersions { get; set; }
 
     public virtual DbSet<VwManualNotification> VwManualNotification { get; set; }
-    
+
+    /// <summary>Which notifications each office user has read (Notification_Read; Features/NotificationReads).</summary>
+    public virtual DbSet<NotificationRead> Notification_Read { get; set; } = null!;
+
+    partial void OnModelCreatingPartial(ModelBuilder modelBuilder) => SyncRowTriggers.Apply(modelBuilder, null);
+
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
         if (!optionsBuilder.IsConfigured)

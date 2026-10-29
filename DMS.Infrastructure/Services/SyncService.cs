@@ -24,8 +24,7 @@ namespace DMS.Application;
 ///   ...Attachment / ...File    file contents, downloaded by the vessel during its sync
 /// Every call is recorded in Sync_Log.
 ///
-/// The vessel monitor's "Queued" / "On board" still reads (GetQueuedItemsAsync), which only the old
-/// item pull filled.
+/// The vessel monitor's "Queued" / "On board" comes from the changes still waiting in Sync_ChangeLog.
 /// </summary>
 public partial class SyncService : ISyncService
 {
@@ -94,7 +93,13 @@ public partial class SyncService : ISyncService
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
         var row = await _general.SyncVesselKeys.FirstOrDefaultAsync(k => k.VesselID == vesselId);
-        if (row == null) _general.SyncVesselKeys.Add(row = new SyncVesselKey { VesselID = vesselId });
+        if (row == null)
+            _general.SyncVesselKeys.Add(row = new SyncVesselKey
+            {
+                Sync_VesselKeyID = await _general.NextIdAsync<SyncVesselKey>(),
+                Origin = TableIdExtensions.OriginHQ,
+                VesselID = vesselId,
+            });
         row.KeyHash = HashKey(key);
         row.IsActive = true;
         row.CreatedUtc = DateTime.UtcNow;
@@ -106,30 +111,15 @@ public partial class SyncService : ISyncService
         return key;
     }
 
+    /// <summary>
+    /// "Resync": every record the vessel should hold is queued for it again (dbo.Sync_QueueFullCopy writes a
+    /// Sync_ChangeLog row per record not already waiting); its next sync brings them all, as they are now.
+    /// </summary>
     public async Task RequestResyncAsync(int vesselId)
     {
-        await _general.SyncVesselItems.Where(i => i.VesselID == vesselId).ExecuteDeleteAsync();
-    }
-
-    // =========================================================================================
-    // Change table (dbo.Sync_Outbox, Database/006_VesselSyncOutbox.sql)
-    // =========================================================================================
-
-    private bool? _outboxInstalled;
-
-    private async Task<bool> IsOutboxInstalledAsync()
-    {
-        _outboxInstalled ??= await _general.TableExistsAsync("Sync_Outbox");
-        return _outboxInstalled.Value;
-    }
-
-    /// <summary>Items with a change-table row not yet downloaded by the vessel (or by every vessel when null).</summary>
-    private async Task<List<(int VesselId, string Type, long Id)>> LoadOutboxRowsAsync(int? vesselId)
-    {
-        var query = _general.SyncOutbox.AsNoTracking().Where(o => o.DownloadedUtc == null);
-        if (vesselId != null) query = query.Where(o => o.VesselID == vesselId.Value);
-        var rows = await query.Select(o => new { o.VesselID, o.ItemType, o.ItemID }).Distinct().ToListAsync();
-        return rows.Select(r => (r.VesselID, r.ItemType.Trim(), r.ItemID)).ToList();
+        if (vesselId <= 0) throw new ArgumentOutOfRangeException(nameof(vesselId), "Give one vessel.");
+        _general.Database.SetCommandTimeout(TimeSpan.FromMinutes(10)); // the whole library for one vessel
+        await _general.Database.ExecuteSqlInterpolatedAsync($"EXEC dbo.Sync_QueueFullCopy @VesselID = {vesselId}");
     }
 
     // =========================================================================================
@@ -151,11 +141,11 @@ public partial class SyncService : ISyncService
             // The waiting rows, oldest first; one more than asked tells whether more are waiting.
             var waiting = (await _general.SyncChangeLogs.AsNoTracking()
                     .Where(c => c.VesselID == vesselId && c.DownloadedUtc == null)
-                    .OrderBy(c => c.SyncChangeID)
+                    .OrderBy(c => c.Sync_ChangeLogID)
                     .Take(max + 1)
-                    .Select(c => new { c.SyncChangeID, c.TableName, c.KeyValue })
+                    .Select(c => new { c.Sync_ChangeLogID, c.TableName, c.KeyValue })
                     .ToListAsync())
-                .Select(c => (Id: c.SyncChangeID, Table: c.TableName, Key: c.KeyValue))
+                .Select(c => (Id: c.Sync_ChangeLogID, Table: c.TableName, Key: c.KeyValue))
                 .ToList();
             var hasMore = waiting.Count > max;
             if (hasMore) waiting.RemoveAt(waiting.Count - 1);
@@ -216,7 +206,41 @@ public partial class SyncService : ISyncService
     public async Task<SyncChangesConfirmResult> ConfirmChangesAsync(int vesselId, IReadOnlyCollection<long> changeIds)
     {
         var confirmed = await MarkChangesAsync(vesselId, changeIds.Distinct().ToList(), "DownloadedUtc");
+        await PruneAsync(vesselId);
         return new SyncChangesConfirmResult { Confirmed = confirmed };
+    }
+
+    /// <summary>Days a change the vessel has confirmed is kept in Sync_ChangeLog (then deleted).</summary>
+    private const int ChangeLogKeepDays = 30;
+    /// <summary>Days a sync call is kept in Sync_Log (the Sync history of the vessel).</summary>
+    private const int SyncLogKeepDays = 90;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> LastPruneUtc = new();
+
+    /// <summary>
+    /// Keeps Sync_ChangeLog and Sync_Log from growing for ever: a vessel's confirmed changes older than
+    /// ChangeLogKeepDays and its calls older than SyncLogKeepDays are deleted, at most once an hour per vessel.
+    /// Never fails the sync call it runs in.
+    /// </summary>
+    private async Task PruneAsync(int vesselId)
+    {
+        var now = DateTime.UtcNow;
+        if (LastPruneUtc.TryGetValue(vesselId, out var last) && now - last < TimeSpan.FromHours(1)) return;
+        LastPruneUtc[vesselId] = now;
+        try
+        {
+            var changesBefore = now.AddDays(-ChangeLogKeepDays);
+            await _general.SyncChangeLogs
+                .Where(c => c.VesselID == vesselId && c.DownloadedUtc != null && c.DownloadedUtc < changesBefore)
+                .ExecuteDeleteAsync();
+            var callsBefore = now.AddDays(-SyncLogKeepDays);
+            await _general.Sync_Logs
+                .Where(l => l.VesselID == vesselId && l.StartedUtc < callsBefore)
+                .ExecuteDeleteAsync();
+        }
+        catch
+        {
+            LastPruneUtc.TryRemove(vesselId, out _); // tried again with the next call
+        }
     }
 
     /// <summary>Sets SentUtc or DownloadedUtc (now) on this vessel's change rows, in chunks.</summary>
@@ -228,7 +252,7 @@ public partial class SyncService : ISyncService
         {
             var list = chunk.ToList();
             var now = DateTime.UtcNow;
-            var rows = _general.SyncChangeLogs.Where(c => c.VesselID == vesselId && list.Contains(c.SyncChangeID));
+            var rows = _general.SyncChangeLogs.Where(c => c.VesselID == vesselId && list.Contains(c.Sync_ChangeLogID));
             total += column == "SentUtc"
                 ? await rows.ExecuteUpdateAsync(u => u.SetProperty(c => c.SentUtc, now))
                 : await rows.Where(c => c.DownloadedUtc == null).ExecuteUpdateAsync(u => u.SetProperty(c => c.DownloadedUtc, now));
@@ -673,7 +697,7 @@ public partial class SyncService : ISyncService
 
     public async Task HeartbeatAsync(SyncHeartbeatRequest request)
     {
-        var pending = Math.Max(0, request.PendingManualAcks) + Math.Max(0, request.PendingCircularAcks);
+        var pending = Math.Max(0, request.PendingManualAcks) + Math.Max(0, request.PendingCircularAcks) + Math.Max(0, request.PendingOther);
         int? progress = request.ProgressPercent is int p ? Math.Clamp(p, 0, 100) : null;
         var failed = !request.LastCycleSucceeded;
 
@@ -740,279 +764,104 @@ public partial class SyncService : ISyncService
     // Sync monitor
     // =========================================================================================
 
+    /// <summary>The synced tables that belong to a manual or a circular (what the monitor counts as "queued").</summary>
+    private static readonly HashSet<string> ItemTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "DM_Manual", "DM_ManualVersion", "DM_Manual_Attachments", "DM_Manual_ToAck_Vsl",
+        "CIR_Master", "CIR_Blob", "CIR_ToAck_Vsl",
+    };
+
+    /// <summary>
+    /// Per vessel, the manuals and circulars with a change waiting for it in Sync_ChangeLog (not yet confirmed by the
+    /// vessel): the record itself, a version, a file or a vessel assignment of it. Empty when the change log is missing.
+    /// </summary>
     public async Task<Dictionary<int, HashSet<(string ItemType, long ItemId)>>> GetQueuedItemsAsync(IReadOnlyCollection<int> vesselIds)
     {
-        var result = new Dictionary<int, HashSet<(string ItemType, long ItemId)>>();
-        if (vesselIds.Count == 0 || !await IsInstalledAsync()) return result;
+        var result = vesselIds.Distinct().ToDictionary(v => v, _ => new HashSet<(string ItemType, long ItemId)>());
+        if (result.Count == 0 || !await _general.TableExistsAsync("Sync_ChangeLog")) return result;
 
-        var catalog = await LoadCatalogAsync(vesselIds);
-        // One vessel (the vessel details page): read only its rows, not the whole fleet's.
-        int? only = vesselIds.Distinct().Count() == 1 ? vesselIds.First() : null;
-        var trackedByVessel = (await LoadTrackedRowsAsync(only))
-            .GroupBy(t => t.VesselId)
-            .ToDictionary(g => g.Key, g => g.ToDictionary(t => (t.Type, t.Id)));
-        var outboxByVessel = await IsOutboxInstalledAsync()
-            ? (await LoadOutboxRowsAsync(only))
-                .Where(r => r.Type == TypeManual || r.Type == TypeCircular)
-                .ToLookup(r => r.VesselId, r => (r.Type, r.Id))
-            : Enumerable.Empty<(int VesselId, string Type, long Id)>().ToLookup(r => r.VesselId, r => (r.Type, r.Id));
+        var ids = result.Keys.ToList();
+        var tables = ItemTables.ToList();
+        var waiting = await _general.SyncChangeLogs.AsNoTracking()
+            .Where(c => ids.Contains(c.VesselID) && c.DownloadedUtc == null && tables.Contains(c.TableName))
+            .Select(c => new { c.VesselID, c.TableName, c.KeyValue })
+            .Distinct()
+            .ToListAsync();
+        if (waiting.Count == 0) return result;
 
-        foreach (var vesselId in vesselIds.Distinct())
+        List<long> KeysOf(string table) => waiting
+            .Where(w => string.Equals(w.TableName.Trim(), table, StringComparison.OrdinalIgnoreCase))
+            .Select(w => w.KeyValue).Distinct().ToList();
+
+        // Child records -> their manual / circular (a record deleted since cannot be traced and is not counted).
+        var versionKeys = KeysOf("DM_ManualVersion");
+        var versions = versionKeys.Count == 0 ? new Dictionary<long, long>() : await _dms.DmManualVersions.AsNoTracking()
+            .Where(v => versionKeys.Contains(v.DM_ManualVersionID))
+            .ToDictionaryAsync(v => v.DM_ManualVersionID, v => v.DM_ManualID);
+        var fileKeys = KeysOf("DM_Manual_Attachments");
+        var manualFiles = fileKeys.Count == 0 ? new Dictionary<long, long>() : await _dms.DmManualAttachments.AsNoTracking()
+            .Where(a => fileKeys.Contains(a.DmManualAttachmentsId))
+            .ToDictionaryAsync(a => a.DmManualAttachmentsId, a => a.DM_ManualID);
+        var manualAssignKeys = KeysOf("DM_Manual_ToAck_Vsl");
+        var manualAssign = manualAssignKeys.Count == 0 ? new Dictionary<long, long>() : await _dms.DmManualToAckVsls.AsNoTracking()
+            .Where(a => manualAssignKeys.Contains(a.DmManualToAckVslId))
+            .ToDictionaryAsync(a => a.DmManualToAckVslId, a => a.DM_ManualID);
+        var blobKeys = KeysOf("CIR_Blob");
+        var circularFiles = blobKeys.Count == 0 ? new Dictionary<long, long>() : (await _cir.CIR_Blob.AsNoTracking()
+                .Where(b => blobKeys.Contains(b.CIR_BlobID) && b.CIR_MasterID != null)
+                .Select(b => new { b.CIR_BlobID, b.CIR_MasterID })
+                .ToListAsync())
+            .ToDictionary(b => b.CIR_BlobID, b => b.CIR_MasterID!.Value);
+        var circularAssignKeys = KeysOf("CIR_ToAck_Vsl");
+        var circularAssign = circularAssignKeys.Count == 0 ? new Dictionary<long, long>() : await _cir.CIR_ToAck_Vsl.AsNoTracking()
+            .Where(a => circularAssignKeys.Contains(a.CIR_ToAck_VslID))
+            .ToDictionaryAsync(a => a.CIR_ToAck_VslID, a => a.CIR_MasterID);
+
+        foreach (var w in waiting)
         {
-            trackedByVessel.TryGetValue(vesselId, out var rows);
-            rows ??= new Dictionary<(string, long), TrackedRow>();
-
-            var expected = catalog.ExpectedFor(vesselId);
-            var queued = expected
-                .Where(e => !rows.TryGetValue((e.Type, e.Id), out var t) || t.Confirmed != e.Key)
-                .Select(e => (e.Type, e.Id))
-                .ToHashSet();
-
-            // Still on board but no longer meant for this vessel: a removal is waiting to go out.
-            var expectedKeys = expected.Select(e => (e.Type, e.Id)).ToHashSet();
-            foreach (var k in rows.Keys)
-                if ((k.Item1 == TypeManual || k.Item1 == TypeCircular) && !expectedKeys.Contains(k))
-                    queued.Add(k);
-
-            // Changes recorded in the change table and not downloaded yet.
-            foreach (var k in outboxByVessel[vesselId])
-                queued.Add(k);
-
-            result[vesselId] = queued;
+            var queued = result[w.VesselID];
+            switch (w.TableName.Trim().ToUpperInvariant())
+            {
+                case "DM_MANUAL": queued.Add((TypeManual, w.KeyValue)); break;
+                case "DM_MANUALVERSION" when versions.TryGetValue(w.KeyValue, out var m): queued.Add((TypeManual, m)); break;
+                case "DM_MANUAL_ATTACHMENTS" when manualFiles.TryGetValue(w.KeyValue, out var m): queued.Add((TypeManual, m)); break;
+                case "DM_MANUAL_TOACK_VSL" when manualAssign.TryGetValue(w.KeyValue, out var m): queued.Add((TypeManual, m)); break;
+                case "CIR_MASTER": queued.Add((TypeCircular, w.KeyValue)); break;
+                case "CIR_BLOB" when circularFiles.TryGetValue(w.KeyValue, out var c): queued.Add((TypeCircular, c)); break;
+                case "CIR_TOACK_VSL" when circularAssign.TryGetValue(w.KeyValue, out var c): queued.Add((TypeCircular, c)); break;
+            }
         }
         return result;
     }
 
-    // =========================================================================================
-    // Catalog: what each vessel should have, with version keys
-    // =========================================================================================
-
-    private sealed record ExpectedItem(string Type, long Id, string Key, int Order, long TextLength);
-
-    private sealed record ManualMeta(long Id, long ParentId, int Level, string BaseKey, bool HasVersion, long? VersionId, long TextLength);
-
-    private sealed record CircularMeta(long Id, string BaseKey, int Order);
-
-    private sealed class Catalog
+    /// <summary>Per vessel, the changes (records of any synced table) waiting in Sync_ChangeLog for its next sync.</summary>
+    public async Task<Dictionary<int, int>> GetWaitingChangesAsync(IReadOnlyCollection<int> vesselIds)
     {
-        public Dictionary<long, ManualMeta> Manuals { get; } = new();
-        public Dictionary<long, CircularMeta> Circulars { get; } = new();
-        /// <summary>(vesselId or -1) -> manual -> ranks</summary>
-        public Dictionary<int, Dictionary<long, SortedSet<string>>> ManualAssign { get; } = new();
-        public Dictionary<int, Dictionary<long, SortedSet<string>>> CircularAssign { get; } = new();
-
-        private static IEnumerable<string> Ranks(Dictionary<int, Dictionary<long, SortedSet<string>>> map, int vesselId, long id)
-        {
-            var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var v in new[] { vesselId, -1 })
-                if (map.TryGetValue(v, out var byItem) && byItem.TryGetValue(id, out var ranks))
-                    set.UnionWith(ranks);
-            return set;
-        }
-
-        public IEnumerable<string> ManualRanks(int vesselId, long id) => Ranks(ManualAssign, vesselId, id);
-        public IEnumerable<string> CircularRanks(int vesselId, long id) => Ranks(CircularAssign, vesselId, id);
-
-        private static IEnumerable<long> Assigned(Dictionary<int, Dictionary<long, SortedSet<string>>> map, int vesselId) =>
-            new[] { vesselId, -1 }.SelectMany(v => map.TryGetValue(v, out var byItem) ? byItem.Keys : Enumerable.Empty<long>()).Distinct();
-
-        public List<ExpectedItem> ExpectedFor(int vesselId)
-        {
-            var items = new List<ExpectedItem>();
-
-            // Manuals with a released version, and every manual above them so the tree is complete on board.
-            var manualIds = new HashSet<long>();
-            foreach (var id in Assigned(ManualAssign, vesselId))
-            {
-                if (!Manuals.TryGetValue(id, out var m) || !m.HasVersion) continue;
-                var current = m;
-                while (current != null && manualIds.Add(current.Id))
-                    current = current.ParentId != 0 && Manuals.TryGetValue(current.ParentId, out var parent) ? parent : null;
-            }
-            foreach (var id in manualIds)
-            {
-                var m = Manuals[id];
-                var key = Hash($"{m.BaseKey}|r:{string.Join(",", ManualRanks(vesselId, id))}");
-                items.Add(new ExpectedItem(TypeManual, id, key, 1_000 + m.Level, m.TextLength));
-            }
-
-            foreach (var id in Assigned(CircularAssign, vesselId))
-            {
-                if (!Circulars.TryGetValue(id, out var c)) continue;
-                var key = Hash($"{c.BaseKey}|r:{string.Join(",", CircularRanks(vesselId, id))}");
-                items.Add(new ExpectedItem(TypeCircular, id, key, c.Order, 0));
-            }
-            return items;
-        }
-    }
-
-    /// <summary>Loads the metadata needed to work out what the given vessels should have (no manual text or files).</summary>
-    private async Task<Catalog> LoadCatalogAsync(IReadOnlyCollection<int> vesselIds)
-    {
-        var catalog = new Catalog();
         var ids = vesselIds.Distinct().ToList();
-
-        // ---- Manuals ----
-        var manualAssign = await _dms.DmManualToAckVsls.AsNoTracking()
-            .Where(a => (ids.Contains(a.VesselID) || a.VesselID == -1) && (a.IsActive ?? 1) == 1)
-            .Select(a => new { a.VesselID, a.DM_ManualID, a.UserRank })
-            .ToListAsync();
-        foreach (var a in manualAssign)
-            AddRank(catalog.ManualAssign, a.VesselID, a.DM_ManualID, a.UserRank);
-
-        // One-time full copy (Database/008_Sync_FullCopy.sql): items given to a vessel whether or not they are
-        // assigned to it. They count as assigned with no ranks to acknowledge.
-        var fullCopy = await LoadFullCopyAsync(ids);
-        foreach (var f in fullCopy.Where(f => f.Type == TypeManual))
-            AddRank(catalog.ManualAssign, f.VesselId, f.Id, null);
-
-        // Only the assigned manuals and the manuals above them are needed. Work that set out from a
-        // narrow (id, parent) list first, so the heavy reads below (version text length, attachments)
-        // touch those manuals only instead of the whole library.
-        var parentOf = (await _dms.DmManuals.AsNoTracking()
-                .Where(m => (m.IsDeleted ?? 0) != 1)
-                .Select(m => new { m.DM_ManualID, m.ParentId })
-                .ToListAsync())
-            .ToDictionary(m => m.DM_ManualID, m => m.ParentId);
-        var neededManuals = new HashSet<long>();
-        foreach (var start in manualAssign.Select(a => a.DM_ManualID)
-                     .Concat(fullCopy.Where(f => f.Type == TypeManual).Select(f => f.Id)).Distinct())
-        {
-            var id = start;
-            while (parentOf.TryGetValue(id, out var parentId) && neededManuals.Add(id) && parentId != 0)
-                id = parentId;
-        }
-        var neededManualIds = neededManuals.ToList();
-
-        var manuals = await _dms.DmManuals.AsNoTracking()
-            .Where(m => neededManualIds.Contains(m.DM_ManualID))
-            .Select(m => new
-            {
-                m.DM_ManualID, m.ParentId, m.ManualLevel, m.DM_CategoryID, m.ManualNo, m.ManualCode, m.ManualName,
-                m.IsMainTitle, m.IsAcknowledgementRequired, m.ModifiedDate,
-            })
-            .ToListAsync();
-        var versions = (await _dms.DmManualVersions.AsNoTracking()
-                .Where(v => v.IsActive == 1 && neededManualIds.Contains(v.DM_ManualID))
-                .Select(v => new
-                {
-                    v.DM_ManualID, v.DM_ManualVersionID, v.Version, v.PublishedDate, v.ReleasedDate, v.LastModifiedDate,
-                    TextLength = (long?)v.TextContents!.Length,
-                })
-                .ToListAsync())
-            .GroupBy(v => v.DM_ManualID)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(v => v.DM_ManualVersionID).First());
-        var attachments = (await _dms.DmManualAttachments.AsNoTracking()
-                .Where(a => (a.IsDeleted ?? 0) != 1 && neededManualIds.Contains(a.DM_ManualID))
-                .Select(a => new { a.DmManualAttachmentsId, a.DM_ManualID, a.BlobSize, a.FileType })
-                .ToListAsync())
-            .ToLookup(a => a.DM_ManualID);
-
-        foreach (var m in manuals)
-        {
-            versions.TryGetValue(m.DM_ManualID, out var v);
-            var files = string.Join(",", attachments[m.DM_ManualID].OrderBy(a => a.DmManualAttachmentsId)
-                .Select(a => $"{a.DmManualAttachmentsId}:{a.BlobSize}:{a.FileType}"));
-            var baseKey = string.Join("|", m.ParentId, m.ManualLevel, m.DM_CategoryID, m.ManualNo, m.ManualCode, m.ManualName,
-                m.IsMainTitle, m.IsAcknowledgementRequired, Ticks(m.ModifiedDate),
-                v?.DM_ManualVersionID, v?.Version, Ticks(v?.PublishedDate), Ticks(v?.ReleasedDate), Ticks(v?.LastModifiedDate),
-                v?.TextLength, files);
-            catalog.Manuals[m.DM_ManualID] = new ManualMeta(m.DM_ManualID, m.ParentId, m.ManualLevel, baseKey,
-                v != null, v?.DM_ManualVersionID, v?.TextLength ?? 0);
-        }
-
-        // ---- Circulars ----
-        var circularAssign = await _cir.CIR_ToAck_Vsl.AsNoTracking()
-            .Where(a => (ids.Contains(a.VesselID) || a.VesselID == -1) && (a.IsActive ?? 1) == 1)
-            .Select(a => new { a.VesselID, a.CIR_MasterID, a.UserRank })
-            .ToListAsync();
-        foreach (var a in circularAssign)
-            AddRank(catalog.CircularAssign, a.VesselID, a.CIR_MasterID, a.UserRank);
-        foreach (var f in fullCopy.Where(f => f.Type == TypeCircular))
-            AddRank(catalog.CircularAssign, f.VesselId, f.Id, null);
-
-        var circularIds = circularAssign.Select(a => a.CIR_MasterID)
-            .Concat(fullCopy.Where(f => f.Type == TypeCircular).Select(f => f.Id))
-            .Distinct().ToList();
-        if (circularIds.Count > 0)
-        {
-            var masters = await _cir.CIR_Master.AsNoTracking()
-                .Where(c => circularIds.Contains(c.CIR_MasterID) && (c.IsDeleted ?? 0) != 1
-                         && c.Status != "Temp" && c.Status != "Draft")
-                .Select(c => new
-                {
-                    c.CIR_MasterID, c.CIR_CategoryID, c.CircularType, c.CIR_Number, c.Reference, c.Title, c.Status,
-                    c.Priority, c.DateIssued, c.Remarks, c.ReleasedDate, c.ModifiedDate,
-                })
-                .ToListAsync();
-            var blobs = (await _cir.CIR_Blob.AsNoTracking()
-                    .Where(b => b.CIR_MasterID != null && circularIds.Contains(b.CIR_MasterID.Value))
-                    .Select(b => new { b.CIR_BlobID, CIR_MasterID = b.CIR_MasterID!.Value, b.BlobSize, b.FileName, b.FileType })
-                    .ToListAsync())
-                .ToLookup(b => b.CIR_MasterID);
-
-            foreach (var c in masters)
-            {
-                var files = string.Join(",", blobs[c.CIR_MasterID].OrderBy(b => b.CIR_BlobID)
-                    .Select(b => $"{b.CIR_BlobID}:{b.BlobSize}:{b.FileName}:{b.FileType}"));
-                var baseKey = string.Join("|", c.CIR_CategoryID, c.CircularType, c.CIR_Number, c.Reference, c.Title, c.Status,
-                    c.Priority, Ticks(c.DateIssued), c.Remarks, Ticks(c.ReleasedDate), Ticks(c.ModifiedDate), files);
-                // Alerts first, then by priority (1 High, 2 Medium, 3 Low).
-                var isAlert = (c.CircularType ?? "").Trim().StartsWith("Alert", StringComparison.OrdinalIgnoreCase);
-                var order = (isAlert ? 0 : 10) + Math.Clamp(c.Priority ?? 3, 1, 9);
-                catalog.Circulars[c.CIR_MasterID] = new CircularMeta(c.CIR_MasterID, baseKey, order);
-            }
-        }
-
-        return catalog;
-    }
-
-    private bool? _fullCopyInstalled;
-
-    /// <summary>Rows of dbo.Sync_FullCopyItem for these vessels (empty when 008_Sync_FullCopy.sql has not been run).</summary>
-    private async Task<List<(int VesselId, string Type, long Id)>> LoadFullCopyAsync(List<int> vesselIds)
-    {
-        var rows = new List<(int, string, long)>();
-        if (vesselIds.Count == 0) return rows;
-        _fullCopyInstalled ??= await _general.TableExistsAsync("Sync_FullCopyItem");
-        if (!_fullCopyInstalled.Value) return rows;
-
-        var ids = vesselIds.Distinct().ToList();
-        var items = await _general.SyncFullCopyItems.AsNoTracking()
-            .Where(f => ids.Contains(f.VesselID))
-            .Select(f => new { f.VesselID, f.ItemType, f.ItemID })
-            .ToListAsync();
-        rows.AddRange(items.Select(f => (f.VesselID, f.ItemType.Trim(), f.ItemID)));
-        return rows;
-    }
-
-    private static void AddRank(Dictionary<int, Dictionary<long, SortedSet<string>>> map, int vesselId, long itemId, string? rank)
-    {
-        if (!map.TryGetValue(vesselId, out var byItem)) map[vesselId] = byItem = new();
-        if (!byItem.TryGetValue(itemId, out var ranks)) byItem[itemId] = ranks = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (!string.IsNullOrWhiteSpace(rank)) ranks.Add(rank!.Trim());
+        if (ids.Count == 0 || !await _general.TableExistsAsync("Sync_ChangeLog")) return new Dictionary<int, int>();
+        return await _general.SyncChangeLogs.AsNoTracking()
+            .Where(c => ids.Contains(c.VesselID) && c.DownloadedUtc == null)
+            .GroupBy(c => c.VesselID)
+            .Select(g => new { VesselID = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.VesselID, x => x.Count);
     }
 
     // =========================================================================================
     // Sync_Vessel, Sync_Log
     // =========================================================================================
 
-    private sealed record TrackedRow(int VesselId, string Type, long Id, string? Pending, string? Confirmed);
-
-    /// <summary>Tracked items of one vessel (or all vessels when null).</summary>
-    private async Task<List<TrackedRow>> LoadTrackedRowsAsync(int? vesselId)
-    {
-        var query = _general.SyncVesselItems.AsNoTracking();
-        if (vesselId != null) query = query.Where(i => i.VesselID == vesselId.Value);
-        var rows = await query.Select(i => new { i.VesselID, i.ItemType, i.ItemID, i.PendingKey, i.ConfirmedKey }).ToListAsync();
-        return rows.Select(r => new TrackedRow(r.VesselID, r.ItemType.Trim(), r.ItemID, r.PendingKey?.Trim(), r.ConfirmedKey?.Trim())).ToList();
-    }
-
     /// <summary>The Sync_Vessel row of a vessel, tracked (a new one when the vessel has none yet).</summary>
     private async Task<SyncVessel> SyncVesselRowAsync(int vesselId)
     {
         var row = await _general.SyncVessels.FirstOrDefaultAsync(v => v.VesselID == vesselId);
-        if (row == null) _general.SyncVessels.Add(row = new SyncVessel { VesselID = vesselId, PendingOnShip = 0 });
+        if (row == null)
+            _general.SyncVessels.Add(row = new SyncVessel
+            {
+                Sync_VesselID = await _general.NextIdAsync<SyncVessel>(),
+                Origin = TableIdExtensions.OriginHQ,
+                VesselID = vesselId,
+                PendingOnShip = 0,
+            });
         return row;
     }
 
@@ -1026,10 +875,13 @@ public partial class SyncService : ISyncService
         }
         catch (DbUpdateException) when (_general.Entry(row).State == EntityState.Added)
         {
-            // The row was added by a parallel call: update that one instead.
+            // The row was added by a parallel call: update that one instead. Any other failure (no parallel row)
+            // is thrown as it is, so the real database error shows - not "Sequence contains no elements".
             var values = _general.Entry(row).CurrentValues.Clone();
             _general.Entry(row).State = EntityState.Detached;
-            var stored = await _general.SyncVessels.FirstAsync(v => v.VesselID == row.VesselID);
+            var stored = await _general.SyncVessels.FirstOrDefaultAsync(v => v.VesselID == row.VesselID);
+            if (stored == null) throw;
+            values[nameof(SyncVessel.Sync_VesselID)] = stored.Sync_VesselID; // keep that row's key
             _general.Entry(stored).CurrentValues.SetValues(values);
             await _general.SaveChangesAsync();
         }
@@ -1052,6 +904,8 @@ public partial class SyncService : ISyncService
         row.LastError = Truncate(error, 1000);
         await SaveSyncVesselAsync(row, new Sync_Log
         {
+            Sync_LogID = await _general.NextIdAsync<Sync_Log>(),
+            Origin = TableIdExtensions.OriginHQ,
             VesselID = vesselId,
             Direction = direction,
             StartedUtc = startedUtc,

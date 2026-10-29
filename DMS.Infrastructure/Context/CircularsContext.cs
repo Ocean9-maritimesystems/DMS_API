@@ -1,5 +1,6 @@
 ﻿using DMS.Application.DTO.Circulars;
 using DMS.Data.EF.Models.Circulars;
+using DMS.Data.EF.Models.Features;
 using Microsoft.EntityFrameworkCore;
 
 namespace DMS.Data.EF.Context;
@@ -29,8 +30,6 @@ public partial class CircularsContext : DbContext
 
     public virtual DbSet<CIR_ToAck_Vsl> CIR_ToAck_Vsl { get; set; } = null!;
 
-    public virtual DbSet<CIR_ToAck_HQ> CIR_ToAck_HQ { get; set; } = null!;
-
     public virtual DbSet<CIR_UserFavourite> CIR_UserFavourite { get; set; }
 
     public virtual DbSet<CIR_Settings> CIR_Settings { get; set; }
@@ -43,14 +42,12 @@ public partial class CircularsContext : DbContext
 
     public virtual DbSet<VwCIRVesselAck> Vw_CIR_VesselAck { get; set; }
 
-
     public virtual DbSet<CIRMasterList> CIRMasterList { get; set; }
+    
+    public virtual DbSet<CirManualLink> CirManualLinks { get; set; } = null!;
 
-    public virtual DbSet<CircularsChart> CircularsChart { get; set; }
-
-    public virtual DbSet<CircularCount_Dashboard> CircularCount_Dashboard { get; set; } = null!;
-
-    public virtual DbSet<CIRRecentList> CIRRecentList { get; set; } = null!;
+    /// <summary>Which notifications each office user has read (Notification_Read; Features/NotificationReads).</summary>
+    public virtual DbSet<NotificationRead> Notification_Read { get; set; } = null!;
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -144,6 +141,19 @@ public partial class CircularsContext : DbContext
         });
 
         modelBuilder.Entity<CircularsChart>(eb =>
+        {
+            eb.HasNoKey();
+            eb.ToView(null);
+        });
+
+        // Results of GetCIR_RecentList / GetCIR_DashboardCount (Set<T>().FromSql in CIRGeneralQueries).
+        modelBuilder.Entity<CIRRecentList>(eb =>
+        {
+            eb.HasNoKey();
+            eb.ToView(null);
+        });
+
+        modelBuilder.Entity<CircularCount_Dashboard>(eb =>
         {
             eb.HasNoKey();
             eb.ToView(null);

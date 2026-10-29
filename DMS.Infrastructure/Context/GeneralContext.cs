@@ -1,5 +1,6 @@
-﻿using DMS.Data.EF.Models;
-using DMS.Application.DTO.Features;
+﻿using DMS.Application.DTO.Features;
+using DMS.Data.EF.Models;
+using DMS.Data.EF.Models.Features;
 using Microsoft.EntityFrameworkCore;
 
 namespace DMS.Data.EF.Context;
@@ -19,15 +20,31 @@ public partial class GeneralContext : DbContext
 
     public virtual DbSet<HqUser> HqUsers { get; set; }
 
-    public virtual DbSet<HqUserActionVsl> HqUserActionVsls { get; set; }
-
     public virtual DbSet<HqUserRole> HqUserRoles { get; set; }
 
     public virtual DbSet<VVessel> VVessels { get; set; }
 
     public virtual DbSet<VslStaff> VslStaffs { get; set; }
 
-    public virtual DbSet<AckPendingRow> AckPendingRows { get; set; } = null!;
+    public virtual DbSet<SugMaster> SugMasters { get; set; } = null!;
+
+    public virtual DbSet<SugLog> SugLogs { get; set; } = null!;
+    
+    public virtual DbSet<SugBlob> SugBlobs { get; set; } = null!;
+    
+    public virtual DbSet<DmsInbox> DmsInbox { get; set; } = null!;
+    
+    public virtual DbSet<DmsInboxRead> DmsInboxReads { get; set; } = null!;
+    
+    public virtual DbSet<BlobTableSettingRow> BlobTableSettings { get; set; } = null!;
+    
+    public virtual DbSet<SyncVessel> SyncVessels { get; set; } = null!;
+    
+    public virtual DbSet<Sync_Log> Sync_Logs { get; set; } = null!;
+    
+    public virtual DbSet<SyncVesselKey> SyncVesselKeys { get; set; } = null!;
+    
+    public virtual DbSet<SyncChangeLog> SyncChangeLogs { get; set; } = null!;
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
