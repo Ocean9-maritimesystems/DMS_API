@@ -223,7 +223,8 @@ public class OtherDocumentService : IOtherDocumentService
             .Where(d => d.OtherDocument_FolderID.HasValue && folderIds.Contains(d.OtherDocument_FolderID.Value) && (d.IsDeleted == null || d.IsDeleted != 1))
             .GroupBy(d => d.OtherDocument_FolderID!.Value).Select(g => new { g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.Key, x => x.Count);
-        var vessels = await _generalContext.VVessels.AsNoTracking().ToDictionaryAsync(v => v.VesselID, v => v.VslName);
+        var vessels = await _generalContext.VVessels.AsNoTracking().Select(v => new { v.VesselID, v.VslName })
+            .ToDictionaryAsync(v => v.VesselID, v => v.VslName);
         return folders.Select(f => new FolderRow
         {
             OtherDocument_FolderID = f.OtherDocument_FolderID, Origin = f.Origin, VesselID = f.VesselID,
@@ -362,9 +363,18 @@ public class OtherDocumentService : IOtherDocumentService
         var folderIds = entities.Where(d => d.OtherDocument_FolderID.HasValue).Select(d => d.OtherDocument_FolderID!.Value).Distinct().ToList();
         var types = await _dbContext.OtherDocument_Type.AsNoTracking().Where(t => typeIds.Contains(t.OtherDocument_TypeID)).ToDictionaryAsync(t => t.OtherDocument_TypeID);
         var folders = await _dbContext.OtherDocument_Folder.AsNoTracking().Where(f => folderIds.Contains(f.OtherDocument_FolderID) && f.IsDeleted == 0).ToDictionaryAsync(f => f.OtherDocument_FolderID);
-        var vesselNames = await _generalContext.VVessels.AsNoTracking().ToDictionaryAsync(v => v.VesselID, v => v.VslName);
+        var vesselNames = await _generalContext.VVessels.AsNoTracking().Select(v => new { v.VesselID, v.VslName })
+            .ToDictionaryAsync(v => v.VesselID, v => v.VslName);
         var documentIds = entities.Select(d => d.OtherDocumentMasterID).ToList();
-        var blobs = await _dbContext.OtherDocument_Blob.AsNoTracking().Where(b => documentIds.Contains(b.OtherDocumentMasterID)).GroupBy(b => b.OtherDocumentMasterID).ToDictionaryAsync(g => g.Key, g => new { Count = g.Count(), First = g.Min(b => b.OtherDocument_BlobID) });
+        // Counted by SQL Server (GROUP BY ... COUNT, MIN): only three numbers per document come back. Before, the
+        // GroupBy went straight into ToDictionaryAsync, which EF runs by loading every file row - its contents
+        // (BlobContents) included - and grouping in memory: the files of all a vessel's documents, each time the
+        // list was opened (about 30 s for vessel 101).
+        var blobs = await _dbContext.OtherDocument_Blob.AsNoTracking()
+            .Where(b => documentIds.Contains(b.OtherDocumentMasterID))
+            .GroupBy(b => b.OtherDocumentMasterID)
+            .Select(g => new { g.Key, Count = g.Count(), First = g.Min(b => b.OtherDocument_BlobID) })
+            .ToDictionaryAsync(x => x.Key, x => new { x.Count, x.First });
 
         var result = entities.Take(2000).Select(d =>
         {
@@ -600,7 +610,7 @@ public class OtherDocumentService : IOtherDocumentService
                 FolderID = b.OtherDocumentMasterID,
                 FileName = b.FileName != null && b.FileName != "" ? b.FileName : b.Description ?? "File",
                 FileType = b.FileType,
-                BlobSize = b.BlobSize,
+                BlobSize = b.BlobSize ?? 0,
                 UploadedOn = b.AddedOn,
             })
             .ToListAsync();

@@ -642,7 +642,7 @@ public partial class SyncService : ISyncService
                 FileName = b.FileName,
                 FileType = b.FileType,
                 OriginalFileType = b.OriginalFileType,
-                BlobSize = b.BlobSize,
+                BlobSize = b.BlobSize ?? 0,
                 AddedOn = b.AddedOn,
                 Cloud_ContainerName = b.Cloud_ContainerName,
                 Cloud_Directory = b.Cloud_Directory,
@@ -675,7 +675,7 @@ public partial class SyncService : ISyncService
                 Origin = m.Origin,
                 VesselID = m.VesselID,
                 OtherDocument_TypeID = m.OtherDocument_TypeID,
-                DocumentNumber = m.DocumentNumber,
+                DocumentNumber = m.DocumentNumber ?? "",
                 DocumentTitle = m.DocumentTitle,
                 Status = m.Status,
                 Reference = m.Reference,
@@ -715,15 +715,22 @@ public partial class SyncService : ISyncService
         await SaveSyncVesselAsync(row);
     }
 
+    // The file downloads below answer in three ways:
+    //   null           no such file for this vessel (removed, or another vessel's): 404
+    //   empty Bytes    the record is there but the office has no file for it (none was ever added): 204, so the
+    //                  ship stops asking for it
+    //   Bytes          the file
+
     public async Task<(byte[] Bytes, string FileType, string? FileName)?> GetManualAttachmentBytesAsync(int vesselId, long attachmentId)
     {
         var a = await _dms.DmManualAttachments.AsNoTracking()
             .Where(x => x.DmManualAttachmentsId == attachmentId && (x.IsDeleted ?? 0) != 1)
             .Select(x => new { x.VesselID, x.BlobContents, x.FileType })
             .FirstOrDefaultAsync();
-        if (a?.BlobContents == null) return null;
+        if (a == null) return null;
         if (!IsForVessel(a.VesselID, vesselId)) return null; // another vessel's file
-        return (a.BlobContents, a.FileType, null);
+        // Manual files are only kept in the database: no contents there means there is no file.
+        return (a.BlobContents is { Length: > 0 } ? a.BlobContents : Array.Empty<byte>(), a.FileType, null);
     }
 
     public async Task<(byte[] Bytes, string FileType, string? FileName)?> GetCircularAttachmentBytesAsync(int vesselId, long attachmentId)
@@ -735,6 +742,9 @@ public partial class SyncService : ISyncService
             .FirstOrDefaultAsync();
         if (b == null || b.CIR_MasterID == null) return null;
         if (!IsForVessel(b.VesselID, vesselId)) return null; // another vessel's file
+        // No file was ever added (no name, nothing in the database): nothing to fetch from a folder or the cloud.
+        if (string.IsNullOrWhiteSpace(b.FileName) && b.BlobContents is not { Length: > 0 })
+            return (Array.Empty<byte>(), b.FileType ?? "application/octet-stream", null);
         // In the database, a local folder or the cloud (BlobTableSettings).
         var bytes = await _storage.ReadAsync(AttachmentStorage.CircularTable, new AttachmentRef(attachmentId, b.FileName, b.BlobContents,
             b.HQ_Storage_Option, b.HQ_Local_Folder, b.Cloud_ContainerName, b.Cloud_Directory));
@@ -753,6 +763,9 @@ public partial class SyncService : ISyncService
                              b.HQ_Storage_Option, b.HQ_Local_Folder, b.Cloud_ContainerName, b.Cloud_Directory })
             .FirstOrDefaultAsync();
         if (f == null) return null;
+        // No file was ever added (no name, nothing in the database): nothing to fetch from a folder or the cloud.
+        if (string.IsNullOrWhiteSpace(f.FileName) && f.BlobContents is not { Length: > 0 })
+            return (Array.Empty<byte>(), f.FileType ?? f.OriginalFileType ?? "application/octet-stream", null);
         // In the database, a local folder or the cloud (BlobTableSettings).
         var bytes = await _storage.ReadAsync(AttachmentStorage.OtherDocumentTable, new AttachmentRef(blobId, f.FileName, f.BlobContents,
             f.HQ_Storage_Option, f.HQ_Local_Folder, f.Cloud_ContainerName, f.Cloud_Directory));
@@ -794,17 +807,22 @@ public partial class SyncService : ISyncService
             .Select(w => w.KeyValue).Distinct().ToList();
 
         // Child records -> their manual / circular (a record deleted since cannot be traced and is not counted).
+        // Only the two columns are read (Select before ToDictionaryAsync): without it EF loads whole rows - a
+        // version's manual text, an attachment's file - and picks the two values in memory.
         var versionKeys = KeysOf("DM_ManualVersion");
         var versions = versionKeys.Count == 0 ? new Dictionary<long, long>() : await _dms.DmManualVersions.AsNoTracking()
             .Where(v => versionKeys.Contains(v.DM_ManualVersionID))
+            .Select(v => new { v.DM_ManualVersionID, v.DM_ManualID })
             .ToDictionaryAsync(v => v.DM_ManualVersionID, v => v.DM_ManualID);
         var fileKeys = KeysOf("DM_Manual_Attachments");
         var manualFiles = fileKeys.Count == 0 ? new Dictionary<long, long>() : await _dms.DmManualAttachments.AsNoTracking()
             .Where(a => fileKeys.Contains(a.DmManualAttachmentsId))
+            .Select(a => new { a.DmManualAttachmentsId, a.DM_ManualID })
             .ToDictionaryAsync(a => a.DmManualAttachmentsId, a => a.DM_ManualID);
         var manualAssignKeys = KeysOf("DM_Manual_ToAck_Vsl");
         var manualAssign = manualAssignKeys.Count == 0 ? new Dictionary<long, long>() : await _dms.DmManualToAckVsls.AsNoTracking()
             .Where(a => manualAssignKeys.Contains(a.DmManualToAckVslId))
+            .Select(a => new { a.DmManualToAckVslId, a.DM_ManualID })
             .ToDictionaryAsync(a => a.DmManualToAckVslId, a => a.DM_ManualID);
         var blobKeys = KeysOf("CIR_Blob");
         var circularFiles = blobKeys.Count == 0 ? new Dictionary<long, long>() : (await _cir.CIR_Blob.AsNoTracking()
@@ -815,6 +833,7 @@ public partial class SyncService : ISyncService
         var circularAssignKeys = KeysOf("CIR_ToAck_Vsl");
         var circularAssign = circularAssignKeys.Count == 0 ? new Dictionary<long, long>() : await _cir.CIR_ToAck_Vsl.AsNoTracking()
             .Where(a => circularAssignKeys.Contains(a.CIR_ToAck_VslID))
+            .Select(a => new { a.CIR_ToAck_VslID, a.CIR_MasterID })
             .ToDictionaryAsync(a => a.CIR_ToAck_VslID, a => a.CIR_MasterID);
 
         foreach (var w in waiting)

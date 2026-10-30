@@ -41,9 +41,9 @@ public partial class DmManual
 
     public int? IsAcknowledgementRequired { get; set; }
 
-    public int CanExport { get; set; }
+    public int? CanExport { get; set; }
 
-    public int IsApprovalRequired { get; set; }
+    public int? IsApprovalRequired { get; set; }
 
     public int? Approval_FlowID { get; set; }
 

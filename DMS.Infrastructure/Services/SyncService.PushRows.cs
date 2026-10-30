@@ -29,7 +29,7 @@ public partial class SyncService
     private static readonly HashSet<string> InsertOnlyTables = new(StringComparer.OrdinalIgnoreCase)
         { "DMS_InboxRead", "SUG_Master", "SUG_Log", "SUG_Blob", "OtherDocument_Log" };
 
-    /// <summary>The EF entity of each pushable table (all mapped in GeneralContext).</summary>
+    /// <summary>The EF entity of each pushable table (mapped in GeneralContext or OtherDocumentsContext).</summary>
     private static readonly IReadOnlyDictionary<string, Type> PushableEntities = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase)
     {
         ["DMS_InboxRead"] = typeof(DmsInboxRead),
@@ -63,6 +63,7 @@ public partial class SyncService
             finally
             {
                 _general.ChangeTracker.Clear(); // a failed row must not be saved again with the next one
+                _other.ChangeTracker.Clear();
             }
         }
 
@@ -88,21 +89,23 @@ public partial class SyncService
 
         if (!PushableTables.TryGetValue(row.TableName, out var keyColumn)) return $"{row.TableName} cannot be sent from a vessel.";
         var table = PushableTables.Keys.First(k => string.Equals(k, row.TableName, StringComparison.OrdinalIgnoreCase));
-        var entityType = _general.Model.FindEntityType(PushableEntities[table])
-                         ?? throw new InvalidOperationException($"{table} is not mapped in GeneralContext.");
+        
+        DbContext db = _general.Model.FindEntityType(PushableEntities[table]) != null ? _general : _other;
+        var entityType = db.Model.FindEntityType(PushableEntities[table])
+                         ?? throw new InvalidOperationException($"{table} is not mapped in GeneralContext or OtherDocumentsContext.");
 
         // Removed on board: removed here too when it is this vessel's record. Records the office owns once stored
         // (InsertOnlyTables) stay, and one the office never had needs nothing.
         if (string.Equals(row.Action, "D", StringComparison.OrdinalIgnoreCase))
         {
             if (InsertOnlyTables.Contains(table)) return null;
-            var gone = await _general.FindAsync(entityType.ClrType, row.Key);
+            var gone = await db.FindAsync(entityType.ClrType, row.Key);
             if (gone == null) return null;
-            var goneEntry = _general.Entry(gone);
+            var goneEntry = db.Entry(gone);
             if ((goneEntry.Property("Origin").CurrentValue as string) != "VSL" || (int)goneEntry.Property("VesselID").CurrentValue! != vesselId)
                 return $"{table} {row.Key} is not this vessel's record at the office.";
             goneEntry.State = EntityState.Deleted;
-            await _general.SaveChangesAsync();
+            await db.SaveChangesAsync();
             return null;
         }
 
@@ -125,17 +128,17 @@ public partial class SyncService
         values[properties["VesselID"].Name] = vesselId;
 
 
-        var existing = await _general.FindAsync(entityType.ClrType, row.Key);
+        var existing = await db.FindAsync(entityType.ClrType, row.Key);
         if (existing != null)
         {
-            var entry = _general.Entry(existing);
+            var entry = db.Entry(existing);
             if ((entry.Property("Origin").CurrentValue as string) != "VSL" || (int)entry.Property("VesselID").CurrentValue! != vesselId)
                 return $"{table} {row.Key} is already used at the office for another record.";
             if (InsertOnlyTables.Contains(table)) return null; // stored before
             foreach (var (name, value) in values)
                 if (!entry.Property(name).Metadata.IsPrimaryKey())
                     entry.Property(name).CurrentValue = value;
-            await _general.SaveChangesAsync();
+            await db.SaveChangesAsync();
             return null;
         }
 
@@ -143,7 +146,7 @@ public partial class SyncService
         if (error != null) return error;
 
         var entity = Activator.CreateInstance(entityType.ClrType)!;
-        var added = _general.Entry(entity);
+        var added = db.Entry(entity);
         foreach (var (name, value) in values)
             added.Property(name).CurrentValue = value;
         added.State = EntityState.Added;
@@ -159,7 +162,7 @@ public partial class SyncService
             }
         }
 
-        await _general.SaveChangesAsync(); // the row (and the suggestion's status) in one transaction
+        await db.SaveChangesAsync(); // the row (and the suggestion's status) in one transaction
         return null;
     }
 
@@ -170,8 +173,9 @@ public partial class SyncService
             .Where(b => b.SUG_BlobID == blobId)
             .Select(b => new { b.VesselID, b.FileName, b.BlobContents })
             .FirstOrDefaultAsync();
-        if (row?.BlobContents == null || (row.VesselID != vesselId && row.VesselID != -1)) return null;
-        return (row.BlobContents, row.FileName);
+        if (row == null || (row.VesselID != vesselId && row.VesselID != -1)) return null;
+        // Suggestion files are only kept in the database: no contents there means there is no file (204).
+        return (row.BlobContents is { Length: > 0 } ? row.BlobContents : Array.Empty<byte>(), row.FileName);
     }
 
     /// <summary>A child record needs its parent at the office, and the parent must be this vessel's (or for all vessels).</summary>

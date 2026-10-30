@@ -29,7 +29,7 @@ public partial class OtherDocumentMaster
     public long? OtherDocument_TypeID { get; set; }
 
     [StringLength(50)]
-    public string DocumentNumber { get; set; } = null!;
+    public string? DocumentNumber { get; set; }
 
     [StringLength(500)]
     public string DocumentTitle { get; set; } = null!;

@@ -32,7 +32,14 @@ namespace DMS.Data.EF.Handler
                 var cir_Master = _mapper.Map<CIR_Master>(request.createCIR);
 
                 // var cir_Number = await _queries.GetNextCIRNumbersByCategoryAsync(request.createCIR.CIR_CategoryID);
-                cir_Master.CIR_MasterID = await _dbContext.NextIdAsync<CIR_Master>(ct: cancellationToken);
+                // The form makes a temporary record when it opens (api/Circular/AddCirMaster, Status "Temp") and
+                // sends its ID: the circular is saved into that record, under that ID. Only without one (or when it
+                // is gone) is a new record added. Before, a new ID was given and the record "updated" under it - a
+                // row that did not exist, so nothing was updated and EF reported a concurrency error.
+                var tempId = request.createCIR.CIR_MasterID;
+                var intoTemp = tempId > 0 && await _dbContext.CIR_Master.AsNoTracking()
+                    .AnyAsync(m => m.CIR_MasterID == tempId, cancellationToken);
+                cir_Master.CIR_MasterID = intoTemp ? tempId : await _dbContext.NextIdAsync<CIR_Master>(ct: cancellationToken);
                 cir_Master.Origin = "HQ";
                 cir_Master.VesselID = -1;
                 // cir_Master.CIR_Number = cir_Number;
@@ -42,7 +49,10 @@ namespace DMS.Data.EF.Handler
                 cir_Master.ModifiedDate = null;
                 cir_Master.IsDeleted = 0;
 
-                _dbContext.CIR_Master.Update(cir_Master);
+                if (intoTemp)
+                    _dbContext.CIR_Master.Update(cir_Master);
+                else
+                    _dbContext.CIR_Master.Add(cir_Master);
 
                 // Insert Blob
                 var cir_Blob = _mapper.Map<CIR_Blob>(request.createCIR);

@@ -132,6 +132,7 @@ public class SyncController : ControllerBase
     {
         var file = await _service.GetFeatureFileAsync(VesselId, table, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, "application/octet-stream", file.Value.FileName);
     }
 
@@ -141,6 +142,7 @@ public class SyncController : ControllerBase
     {
         var file = await _service.GetManualAttachmentBytesAsync(VesselId, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, MimeTypeOrDefault(file.Value.FileType), file.Value.FileName);
     }
 
@@ -150,6 +152,7 @@ public class SyncController : ControllerBase
     {
         var file = await _service.GetCircularAttachmentBytesAsync(VesselId, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, MimeTypeOrDefault(file.Value.FileType), file.Value.FileName);
     }
 
@@ -159,6 +162,7 @@ public class SyncController : ControllerBase
     {
         var file = await _service.GetOtherDocumentFileBytesAsync(VesselId, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, MimeTypeOrDefault(file.Value.FileType), file.Value.FileName);
     }
 

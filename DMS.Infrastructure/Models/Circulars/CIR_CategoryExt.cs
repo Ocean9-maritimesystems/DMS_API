@@ -20,5 +20,5 @@ public partial class CIR_CategoryExt
     public long? CIR_CategoryID { get; set; }
 
     [StringLength(250)]
-    public string AllowedUsersToAck { get; set; } = null!;
+    public string? AllowedUsersToAck { get; set; }
 }

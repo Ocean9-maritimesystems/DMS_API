@@ -24,7 +24,7 @@ public partial class CIR_Log
     public DateTime? LogDate { get; set; }
 
     [StringLength(150)]
-    public string Activity { get; set; } = null!;
+    public string? Activity { get; set; }
 
     [StringLength(3000)]
     public string? Remarks { get; set; }

@@ -35,7 +35,7 @@ public partial class OtherDocument_Blob
     [StringLength(50)]
     public string? OriginalFileType { get; set; }
 
-    public int BlobSize { get; set; }
+    public int? BlobSize { get; set; }
 
     public byte[]? BlobContents { get; set; }
 

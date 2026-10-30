@@ -36,7 +36,7 @@ public partial class DmManualApprovedList
 
     [StringLength(50)]
     [Unicode(false)]
-    public string HQDept { get; set; } = null!;
+    public string? HQDept { get; set; }
 
     [Column(TypeName = "datetime")]
     public DateTime? ApprovedDate { get; set; }
