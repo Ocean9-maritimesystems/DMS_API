@@ -17,11 +17,19 @@ public partial class OtherDocumentMaster
     [Column("VesselID")]
     public int VesselID { get; set; }
 
+    public long? OtherDocument_FolderID { get; set; }
+
+    /// <summary>
+    /// 1 = added at the office and kept there: never sent to a vessel, even though VesselID is the vessel it is about
+    /// (Database/017_OtherDocument_IsForOfficeOnly.sql). 0 = a normal document.
+    /// </summary>
+    public int IsForOfficeOnly { get; set; }
+
     [Column("OtherDocument_TypeID")]
     public long? OtherDocument_TypeID { get; set; }
 
     [StringLength(50)]
-    public string DocumentNumber { get; set; } = null!;
+    public string? DocumentNumber { get; set; }
 
     [StringLength(500)]
     public string DocumentTitle { get; set; } = null!;

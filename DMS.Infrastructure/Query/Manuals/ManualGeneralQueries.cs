@@ -8,6 +8,8 @@ using Microsoft.Extensions.Configuration;
 using System.Data;
 using DMS.Data.EF.Query.Manuals;
 using DMS.Application.DTO.Manuals;
+using DMS.Application.Interface;
+using DMS.Data.EF.Features;
 
 namespace DMS.Data.EF.Query.Manuals;
 
@@ -16,12 +18,14 @@ public class ManualGeneralQueries : IManualGeneralQueries
     private readonly DmsContext _dbContext;
     private readonly GeneralContext _generalContext;
     private readonly IConfiguration _configuration;
+    private readonly ICurrentUser _currentUser;
 
-    public ManualGeneralQueries(DmsContext dbContext, GeneralContext generalContext, IConfiguration config)
+    public ManualGeneralQueries(DmsContext dbContext, GeneralContext generalContext, IConfiguration config, ICurrentUser currentUser)
     {
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(_dbContext));
         _generalContext = generalContext ?? throw new ArgumentNullException(nameof(_generalContext));
         _configuration = config ?? throw new ArgumentNullException("config");
+        _currentUser = currentUser;
     }
 
     public async Task<List<Manual_TreeviewEntity>> GetDmManualTreeviewAsync(string userID)
@@ -127,23 +131,68 @@ public class ManualGeneralQueries : IManualGeneralQueries
         return result ?? new List<ManualUserAckList>();
     }
 
-    public async Task<List<VwManualNotification>> GetNotificationList()
+    /// <summary>The newest notifications of the last 30 days meant for everyone ('') or for this user.</summary>
+    public async Task<List<VwManualNotification>> GetNotificationList(string userID, int limit)
     {
+        var since = DateTime.Now.AddDays(-30);
         var result = await _dbContext
                             .VwManualNotification
-                            .Where(x => x.CreatedDate >= DateTime.Now.AddDays(-30))
+                            .Where(x => x.CreatedDate >= since && (x.UserID == null || x.UserID == "" || x.UserID == userID))
                             .OrderByDescending(x => x.CreatedDate)
+                            .Take(NotificationReads.ClampLimit(limit))
                             .AsNoTracking()
                             .ToListAsync();
 
-        return result ?? new List<VwManualNotification>();
+        return result;
     }
+
+    // ---------------------------------------------------------------- Approval cycle
+    // DM_Manual_ApprovedList.DM_ManualVersionID / IsVoid (Database/015_BackendFixes.sql) tie each approval to the
+    // version it was given for, so a new version, or a version sent back, goes through the whole flow again.
+
+    public sealed class ApprovedRole
+    {
+        public string? UserRole { get; set; }
+        public string? HQDept { get; set; }
+    }
+
+    /// <summary>The role/department pairs that have already approved this version in its current cycle.</summary>
+    public Task<List<ApprovedRole>> GetApprovedRolesAsync(long dm_ManualID, long dm_ManualVersionID)
+        => _dbContext.DmManualApprovedLists.AsNoTracking()
+            .Where(a => a.DM_ManualID == dm_ManualID && a.DM_ManualVersionID == dm_ManualVersionID && (a.IsVoid ?? 0) == 0)
+            .Select(a => new ApprovedRole { UserRole = a.UserRole, HQDept = a.HQDept })
+            .ToListAsync();
+
+    /// <summary>The first approver (by ApprovalOrder) at this status who has not yet approved this version.</summary>
+    public async Task<DmApprovalAndMailSetup?> GetNextApproverAsync(int? approval_FlowID, long dm_StatusID, long dm_ManualID, long dm_ManualVersionID)
+    {
+        var approved = await GetApprovedRolesAsync(dm_ManualID, dm_ManualVersionID);
+        var steps = await _dbContext.DmApprovalAndMailSetups
+            .Where(s => s.FlowId == approval_FlowID && s.DmStatusId == dm_StatusID)
+            .OrderBy(s => s.ApprovalOrder)
+            .AsNoTracking()
+            .ToListAsync();
+
+        return steps.FirstOrDefault(s => !approved.Any(a =>
+            string.Equals(a.UserRole, s.UserRole, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(a.HQDept, s.HQDept, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    /// <summary>Records which version an approval (already saved) was given for.</summary>
+    public Task TagApprovalAsync(long dm_ManualApprovedListID, long dm_ManualVersionID)
+        => _dbContext.DmManualApprovedLists
+            .Where(a => a.DmManualApprovedListId == dm_ManualApprovedListID)
+            .ExecuteUpdateAsync(u => u.SetProperty(a => a.DM_ManualVersionID, dm_ManualVersionID).SetProperty(a => a.IsVoid, 0));
+
+    /// <summary>Send back or version removed: this version's approvals no longer count (they stay as history).</summary>
+    public Task VoidApprovalsAsync(long dm_ManualID, long dm_ManualVersionID)
+        => _dbContext.DmManualApprovedLists
+            .Where(a => a.DM_ManualID == dm_ManualID && a.DM_ManualVersionID == dm_ManualVersionID && (a.IsVoid ?? 0) == 0)
+            .ExecuteUpdateAsync(u => u.SetProperty(a => a.IsVoid, 1));
 
     public async Task AddToLog(long dm_ManualID, long dm_ManualVersionID, string activity, string remarks)
     {
-        var dm_Manual_LogID = (_dbContext.DmManualLogs
-                                .Select(m => (long?)m.DmManualLogId)
-                                .Max() ?? 0) + 1;
+        var dm_Manual_LogID = await _dbContext.NextIdAsync<DmManualLog>();
 
         var manualLog = new DmManualLog
         {
@@ -154,7 +203,7 @@ public class ManualGeneralQueries : IManualGeneralQueries
             DM_ManualVersionID = dm_ManualVersionID,
             Activity = activity,
             Remarks = remarks,
-            UserName = "",
+            UserName = _currentUser.UserId, // read back as the user ID (ManualLogDto.UserId)
             UserRank = "",
             Logdate = DateTime.Now,
         };
@@ -165,35 +214,25 @@ public class ManualGeneralQueries : IManualGeneralQueries
 
     public async Task AddNotification(long dm_ManualID, long dm_ManualVersionID, string userID, string notificationType, string notificationTitle, string description)
     {
-        try
+        var nextDM_ManualNotificationID = await _dbContext.NextIdAsync<DM_ManualNotification>();
+
+        var manualNotification = new DM_ManualNotification
         {
-            var nextDM_ManualNotificationID = _dbContext.DM_ManualNotification
-                                              .Select(m => (long?)m.DM_ManualNotificationId)
-                                              .Max() ?? 0;
+            DM_ManualNotificationId = nextDM_ManualNotificationID,
+            Origin = "HQ",
+            VesselID = -1,
+            Description = description,
+            NotificationType = notificationType,
+            NotificationTitle = notificationTitle,
+            DM_ManualID = dm_ManualID,
+            DM_ManualVersionID = dm_ManualVersionID,
+            UserID = userID,
+            IsRead = 0,
+            CreatedDate = DateTime.Now
+        };
+        await _dbContext.DM_ManualNotification.AddAsync(manualNotification);
 
-            nextDM_ManualNotificationID = nextDM_ManualNotificationID + 1;
-
-            var manualNotification = new DM_ManualNotification();
-            manualNotification.DM_ManualNotificationId = nextDM_ManualNotificationID;
-            manualNotification.Origin = "HQ";
-            manualNotification.VesselID = -1;
-            manualNotification.Description = description;
-            manualNotification.NotificationType = notificationType;
-            manualNotification.NotificationTitle = notificationTitle;
-            manualNotification.DM_ManualID = dm_ManualID;
-            manualNotification.DM_ManualVersionID = dm_ManualVersionID;
-            manualNotification.UserID = userID;
-            manualNotification.IsRead = 0;
-            manualNotification.CreatedDate = DateTime.Now;
-            await _dbContext.DM_ManualNotification.AddAsync(manualNotification);
-
-            await _dbContext.SaveChangesAsync();
-        }
-        catch (Exception ex)
-        {
-            // Log or rethrow for debugging
-            throw;
-        }
+        await _dbContext.SaveChangesAsync();
     }
 
     public async Task<string?> GetDmManualContentAsync(long dm_ManualID, bool includeSubManuals)

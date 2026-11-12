@@ -14,7 +14,7 @@ public interface IManualGeneralQueries
 
     public Task<List<ManualDetails>> GetUserActionManualList(string userID, string calledMode);
 
-    public Task<List<VwManualNotification>> GetNotificationList();
+    public Task<List<VwManualNotification>> GetNotificationList(string userID, int limit);
 
     public Task<ManualCount_User> GetUserManualCount(string userID);
 

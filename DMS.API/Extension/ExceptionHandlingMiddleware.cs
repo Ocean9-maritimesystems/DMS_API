@@ -55,37 +55,37 @@ public class ExceptionHandlingMiddleware
         if (ex is DbUpdateConcurrencyException)
         {
             result.Code = StatusCodes.Status400BadRequest;
-            result.ErrorMessage = "Concurrency Expection. Only one user allowed to edit content at a time";
+            result.ErrorMessage = "Someone else changed or removed this record while it was being edited. Reload it and try again.";
 
-            logger.LogWarning(ex, $"{result.ErrorMessage} - {stack}");
+            logger.LogWarning(ex, "{Error}", result.ErrorMessage);
         }
         else if (ex is UnauthorizedAccessException)
         {
             result.Code = StatusCodes.Status401Unauthorized;
             result.ErrorMessage = "Unauthorized access";
 
-            logger.LogWarning(ex, $"{result.ErrorMessage} - {stack}");
+            logger.LogWarning(ex, "{Error}", result.ErrorMessage);
         }
         else if (ex is KeyNotFoundException)
         {
             result.Code = StatusCodes.Status404NotFound;
             result.ErrorMessage = ex.Message;
 
-            logger.LogWarning(ex, $"{result.ErrorMessage} - {stack}");
+            logger.LogWarning(ex, "{Error}", result.ErrorMessage);
         }
         else if (ex is ArgumentException or FormatException)
         {
             result.Code = StatusCodes.Status400BadRequest;
             result.ErrorMessage = ex is ArgumentNullException ? "Argument cannot be null" : ex.Message;
 
-            logger.LogWarning(ex, $"{result.ErrorMessage} - {stack}");
+            logger.LogWarning(ex, "{Error}", result.ErrorMessage);
         }
         else
         {
             result.Code = statusCode;
             result.ErrorMessage = $"{msg}";
 
-            logger.LogError(ex, $"Expection occured: {result.ErrorMessage} - {stack}");
+            logger.LogError(ex, "Unhandled error: {Error}", result.ErrorMessage);
         }
 
         context.Response.StatusCode = result.Code;

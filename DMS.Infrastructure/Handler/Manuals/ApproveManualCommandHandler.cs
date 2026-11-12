@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DMS.Data.EF.Handler.Manuals
 {
+    /// <summary>Approve (or send back) the manual's version at its current approval step.</summary>
     public class ApproveManualCommandHandler : IRequestHandler<ApproveManualCommand, bool>
     {
         private readonly ManualGeneralQueries _queries;
@@ -20,36 +21,41 @@ namespace DMS.Data.EF.Handler.Manuals
 
         public async Task<bool> Handle(ApproveManualCommand request, CancellationToken cancellationToken)
         {
-            var dmManual = _dbContext.DmManuals
-                                .Where(x => x.DM_ManualID == request.Manual.DM_ManualID)
-                                .FirstOrDefault();
-            if (dmManual == null)
-            {
-                throw new ArgumentNullException(nameof(dmManual), "Manual not exists");
-            }
+            var dmManual = await _dbContext.DmManuals
+                                .Where(x => x.DM_ManualID == request.Manual.DM_ManualID && (x.IsDeleted ?? 0) == 0)
+                                .FirstOrDefaultAsync(cancellationToken)
+                ?? throw new KeyNotFoundException($"Manual {request.Manual.DM_ManualID} does not exist.");
 
-            var dmManualVersion = _dbContext.DmManualVersions
-                                        .Where(x => x.DM_ManualVersionID == request.Manual.DM_ManualVersionID)
-                                        .FirstOrDefault();
+            var dmManualVersion = await _dbContext.DmManualVersions
+                                        .Where(x => x.DM_ManualVersionID == request.Manual.DM_ManualVersionID && x.DM_ManualID == dmManual.DM_ManualID)
+                                        .FirstOrDefaultAsync(cancellationToken)
+                ?? throw new KeyNotFoundException($"Version {request.Manual.DM_ManualVersionID} of manual {request.Manual.DM_ManualID} does not exist.");
 
-            if (dmManualVersion == null)
-            {
-                throw new ArgumentNullException(nameof(dmManualVersion), "Manual version not exists");
-            }
+            // Only a manual inside its approval flow (between Draft and Release) can be approved or sent back.
+            var currentStatus = dmManual.DmStatusId;
+            if (currentStatus <= DMStatusConstant.STATUS_DRAFT || currentStatus >= DMStatusConstant.STATUS_RELEASE)
+                throw new ArgumentException(request.isToSendBack
+                    ? "This manual is not waiting for approval, so it cannot be sent back."
+                    : "This manual is not waiting for approval.");
+
+            var flowId = dmManual.Approval_FlowID ?? -1;
+            var manualName = string.IsNullOrWhiteSpace(dmManual.ManualName) ? request.Manual.ManualName : dmManual.ManualName;
+
+            // Everything below is saved together, or not at all.
+            await using var transaction = _dbContext.Database.CurrentTransaction == null
+                ? await _dbContext.Database.BeginTransactionAsync(cancellationToken)
+                : null;
 
             if (!request.isToSendBack)
             {
                 var user = await _queries.GetHQUser(request.Manual.UserID);
 
-                // Insert a new record into DmManualApprovedLists
                 var approvedListEntry = new DmManualApprovedList
                 {
-                    DmManualApprovedListId = (_dbContext.DmManualApprovedLists
-                                             .Select(m => (long?)m.DmManualApprovedListId)
-                                             .Max() ?? 0) + 1,
+                    DmManualApprovedListId = await _dbContext.NextIdAsync<DmManualApprovedList>(ct: cancellationToken),
                     Origin = "HQ",
                     VesselID = -1,
-                    DM_ManualID = request.Manual.DM_ManualID,
+                    DM_ManualID = dmManual.DM_ManualID,
                     UserId = request.Manual.UserID,
                     UserRole = user?.Role ?? "",
                     UserName = user?.UserName ?? "",
@@ -59,21 +65,31 @@ namespace DMS.Data.EF.Handler.Manuals
                 };
                 _dbContext.DmManualApprovedLists.Add(approvedListEntry);
                 await _dbContext.SaveChangesAsync(cancellationToken);
+                await _queries.TagApprovalAsync(approvedListEntry.DmManualApprovedListId, dmManualVersion.DM_ManualVersionID);
+            }
+            else
+            {
+                // Sent back: this version goes through the whole flow again when it is resubmitted.
+                await _queries.VoidApprovalsAsync(dmManual.DM_ManualID, dmManualVersion.DM_ManualVersionID);
             }
 
-            // Get the next approval step for the current approval flow and status
             string nextApproval_HQRole = "", nextApproval_HQDept = "";
-            long nextDM_StatusID = -1;
+            long nextDM_StatusID;
             string notificationType = ManualNotificationType.APPROVE, notificationTitle = "Manual approved";
 
             if (request.isToSendBack)
             {
-                nextDM_StatusID = await _queries.GetSendBackApprovalStatusID(dmManual.Approval_FlowID ?? -1, dmManual.DmStatusId);
-                notificationTitle = "Manual sendback for edit";
+                nextDM_StatusID = await _queries.GetSendBackApprovalStatusID(flowId, currentStatus);
+                // No send-back step set up for this status: back to the editor as a draft.
+                if (nextDM_StatusID == currentStatus) nextDM_StatusID = DMStatusConstant.STATUS_DRAFT;
+                notificationTitle = "Manual sent back for edit";
             }
             else
-            { 
-                nextDM_StatusID = await _queries.GetNextApprovalStatusID(dmManual.Approval_FlowID ?? -1, dmManual.DmStatusId);
+            {
+                nextDM_StatusID = await _queries.GetNextApprovalStatusID(flowId, currentStatus);
+                if (nextDM_StatusID == currentStatus)
+                    throw new ArgumentException("The approval flow of this manual has no next step after its current status. " +
+                                                "Check DM_ApprovalAndMailSetup for approval flow " + flowId + ".");
             }
 
             if (nextDM_StatusID == DMStatusConstant.STATUS_RELEASE)
@@ -81,23 +97,16 @@ namespace DMS.Data.EF.Handler.Manuals
                 notificationType = ManualNotificationType.PUBLISH;
                 notificationTitle = "Manual approved and Released";
             }
-
-            if (nextDM_StatusID != DMStatusConstant.STATUS_RELEASE)
+            else if (nextDM_StatusID > DMStatusConstant.STATUS_DRAFT)
             {
-                var nextApproval = await (
-                                from setup in _dbContext.DmApprovalAndMailSetups
-                                where setup.FlowId == dmManual.Approval_FlowID
-                                    && setup.DmStatusId == nextDM_StatusID
-                                    && !_dbContext.DmManualApprovedLists.Any(a => a.DM_ManualID == dmManual.DM_ManualID
-                                                                                && a.UserRole == setup.UserRole && a.HQDept == setup.HQDept)
-                                orderby setup.ApprovalOrder
-                                select setup
-                             ).FirstOrDefaultAsync();
+                var nextApproval = await _queries.GetNextApproverAsync(dmManual.Approval_FlowID, nextDM_StatusID,
+                                                                       dmManual.DM_ManualID, dmManualVersion.DM_ManualVersionID);
                 if (nextApproval != null)
                 {
                     nextApproval_HQRole = nextApproval.UserRole ?? "";
                     nextApproval_HQDept = nextApproval.HQDept ?? "";
-                    notificationTitle = "Manual approved and moved to next approval (" + nextApproval_HQRole + " - " + nextApproval_HQDept + ")";
+                    notificationTitle = (request.isToSendBack ? "Manual sent back to " : "Manual approved and moved to next approval (")
+                                        + nextApproval_HQRole + " - " + nextApproval_HQDept + (request.isToSendBack ? "" : ")");
                 }
             }
 
@@ -119,7 +128,14 @@ namespace DMS.Data.EF.Handler.Manuals
             _dbContext.DmManualVersions.Update(dmManualVersion);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
-            await _queries.AddNotification(dmManual.DM_ManualID, dmManualVersion.DM_ManualVersionID, "", notificationType, notificationTitle, "Manual: " + request.Manual.ManualName);
+            await _queries.AddToLog(dmManual.DM_ManualID, dmManualVersion.DM_ManualVersionID,
+                request.isToSendBack ? "Manual Sent Back" : "Manual Approved",
+                "Manual Name: " + manualName + Environment.NewLine + "Version: " + dmManualVersion.Version +
+                (string.IsNullOrWhiteSpace(request.Manual.Comments) ? "" : Environment.NewLine + "Comments: " + request.Manual.Comments));
+
+            await _queries.AddNotification(dmManual.DM_ManualID, dmManualVersion.DM_ManualVersionID, "", notificationType, notificationTitle, "Manual: " + manualName);
+
+            if (transaction != null) await transaction.CommitAsync(cancellationToken);
 
             return true;
         }

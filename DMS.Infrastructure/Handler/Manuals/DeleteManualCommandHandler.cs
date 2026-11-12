@@ -1,9 +1,12 @@
-﻿using DMS.Data.EF.Context;
+﻿using DMS.Data.EF.Constant;
+using DMS.Data.EF.Context;
 using DMS.Data.EF.Query.Manuals;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 
 namespace DMS.Data.EF.Handler.Manuals
 {
+    /// <summary>Marks a manual, its versions and its attachments deleted, and records who did it.</summary>
     public class DeleteManualCommandHandler : IRequestHandler<DeleteManualCommand, bool>
     {
         private readonly ManualGeneralQueries _queries;
@@ -17,46 +20,40 @@ namespace DMS.Data.EF.Handler.Manuals
 
         public async Task<bool> Handle(DeleteManualCommand request, CancellationToken cancellationToken)
         {
-            var dmManual = _dbContext.DmManuals
+            var dmManual = await _dbContext.DmManuals
                             .Where(x => x.DM_ManualID == request.Manual.DM_ManualID)
-                            .FirstOrDefault();
+                            .FirstOrDefaultAsync(cancellationToken)
+                ?? throw new KeyNotFoundException($"Manual {request.Manual.DM_ManualID} does not exist.");
 
-            if (dmManual == null)
-            {
-                throw new ArgumentNullException(nameof(dmManual), "Manual not exists");
-            }
-       
+            if (dmManual.IsDeleted == 1)
+                return true; // already deleted (a second click)
+
             dmManual.IsDeleted = 1;
             dmManual.ModifiedBy = request.Manual.UserID;
             dmManual.ModifiedDate = DateTime.UtcNow;
             _dbContext.DmManuals.Update(dmManual);
 
-            // Optionally, can also delete related versions & attachments
-            var manualVersions = _dbContext.DmManualVersions
-                                    .Where(v => v.DM_ManualID == request.Manual.DM_ManualID)
-                                    .ToList();
-            if (manualVersions.Any())
+            var manualVersions = await _dbContext.DmManualVersions
+                                    .Where(v => v.DM_ManualID == dmManual.DM_ManualID)
+                                    .ToListAsync(cancellationToken);
+            foreach (var version in manualVersions)
             {
-                foreach (var version in manualVersions)
-                {
-                    version.IsActive = 0;
-                }
-                _dbContext.DmManualVersions.UpdateRange(manualVersions);
+                version.IsActive = 0;
             }
 
-            var attachments = _dbContext.DmManualAttachments
-                                .Where(a => a.DM_ManualID == request.Manual.DM_ManualID)
-                                .ToList();
-            if (attachments.Any())
+            var attachments = await _dbContext.DmManualAttachments
+                                .Where(a => a.DM_ManualID == dmManual.DM_ManualID)
+                                .ToListAsync(cancellationToken);
+            foreach (var attachment in attachments)
             {
-                for (int i = 0; i < attachments.Count; i++)
-                {
-                    attachments[i].IsDeleted = 1;
-                }
-                _dbContext.DmManualAttachments.UpdateRange(attachments);
+                attachment.IsDeleted = 1;
             }
 
-            await _queries.AddToLog(request.Manual.DM_ManualID, -1, "Manual Deleted", "Manual Name: " + dmManual.ManualName);
+            // AddToLog saves the changes above together with the log entry.
+            await _queries.AddToLog(dmManual.DM_ManualID, -1, "Manual Deleted", "Manual Name: " + dmManual.ManualName);
+
+            await _queries.AddNotification(dmManual.DM_ManualID, -1, "", ManualNotificationType.DELETE, "Manual deleted",
+                "Manual: " + dmManual.ManualName);
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 

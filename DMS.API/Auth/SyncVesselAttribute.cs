@@ -13,6 +13,7 @@ namespace DMS.API.Auth;
 /// sync endpoints reachable only from the vessels' network path (VPN, firewall rule or IP allow-list).
 /// </summary>
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method)]
+[Obsolete("No secret check: any caller could act as any vessel. Use [VesselKey] (X-Vessel-Id + X-Vessel-Key).", error: true)]
 public sealed class SyncVesselAttribute : TypeFilterAttribute
 {
     public const string VesselIdHeader = "X-Vessel-Id";

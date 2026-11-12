@@ -1,6 +1,3 @@
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Text;
 using DMS.API.Auth;
 using DMS.Application.DTO;
 using DMS.Application.Interface;
@@ -9,6 +6,10 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace DMS.API.Controllers;
 
@@ -47,18 +48,17 @@ public class LoginController : ControllerBase
 
         var user = await _users.GetUserForLoginAsync(userLogin.UserId.Trim());
 
-        // Hasher.VerifyHashedPassword(null!, user.PasswordHash, userLogin.Password) == PasswordVerificationResult.Failed
-        var isPasswordValid =
-            user?.PasswordHash is not null &&
-            string.Equals(
-                user.PasswordHash,
-                userLogin.Password,
-                StringComparison.Ordinal);
-
-        if (!isPasswordValid)
+        if (user is null || !VerifyPassword(user.PasswordHash, userLogin.Password, out var needsRehash))
         {
             _logger.LogWarning("Failed login for {UserId}", userLogin.UserId);
             return Unauthorized("Invalid user ID or password.");
+        }
+
+        // A password still stored as plain text (or with an old hash format) is replaced by a hash now.
+        if (needsRehash)
+        {
+            await _users.SetPasswordHashAsync(user.UserId, HashPassword(userLogin.Password));
+            _logger.LogInformation("Password for {UserId} upgraded to a hash", user.UserId);
         }
 
         var expires = DateTime.UtcNow.AddMinutes(_jwt.AccessTokenExpireMinutes);
@@ -106,11 +106,10 @@ public class LoginController : ControllerBase
             return BadRequest("The new password must be at least 10 characters.");
 
         var user = await _users.GetUserForLoginAsync(userId);
-        if (user?.PasswordHash is null ||
-            Hasher.VerifyHashedPassword(null!, user.PasswordHash, request.CurrentPassword) == PasswordVerificationResult.Failed)
+        if (user is null || !VerifyPassword(user.PasswordHash, request.CurrentPassword ?? "", out _))
             return BadRequest("The current password is not correct.");
 
-        await _users.SetPasswordHashAsync(userId, Hasher.HashPassword(null!, request.NewPassword));
+        await _users.SetPasswordHashAsync(userId, HashPassword(request.NewPassword));
         return NoContent();
     }
 
@@ -123,6 +122,46 @@ public class LoginController : ControllerBase
         return Ok(new { server, database });
     }
 
-    /// <summary>Used by "dotnet run -- set-password" (see Program.cs).</summary>
+    /// <summary>Used by login, change password and "dotnet run -- set-password" (see Program.cs).</summary>
     internal static string HashPassword(string password) => Hasher.HashPassword(null!, password);
+
+    /// <summary>
+    /// Checks a password against HQ_Users.PasswordHash. Older rows still hold the password as plain text:
+    /// those are accepted once and flagged, so the caller replaces them with a hash. A stored value that is a
+    /// real hash is never compared as text (typing the hash itself does not log in).
+    /// </summary>
+    internal static bool VerifyPassword(string? stored, string password, out bool needsRehash)
+    {
+        needsRehash = false;
+        if (string.IsNullOrEmpty(stored) || string.IsNullOrEmpty(password)) return false;
+
+        if (LooksLikeHash(stored))
+        {
+            PasswordVerificationResult result;
+            try
+            {
+                result = Hasher.VerifyHashedPassword(null!, stored, password);
+            }
+            catch (FormatException)
+            {
+                result = PasswordVerificationResult.Failed;
+            }
+
+            needsRehash = result == PasswordVerificationResult.SuccessRehashNeeded;
+            return result != PasswordVerificationResult.Failed;
+        }
+
+        // Legacy plain-text password (constant-time compare).
+        var ok = CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(stored), Encoding.UTF8.GetBytes(password));
+        needsRehash = ok;
+        return ok;
+    }
+
+    /// <summary>ASP.NET Core PasswordHasher output: base64, first byte 0x00 (v2, 49 bytes) or 0x01 (v3, 61+ bytes).</summary>
+    private static bool LooksLikeHash(string stored)
+    {
+        Span<byte> buffer = stackalloc byte[256];
+        if (stored.Length > 340 || !Convert.TryFromBase64String(stored, buffer, out var length)) return false;
+        return (buffer[0] == 0x01 && length >= 61) || (buffer[0] == 0x00 && length == 49);
+    }
 }

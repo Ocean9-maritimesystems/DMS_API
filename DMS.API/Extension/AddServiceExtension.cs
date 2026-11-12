@@ -1,14 +1,14 @@
-using DMS.Data.EF;
-using DMS.Data.EF.Context;
-using System.Text;
-using DMS.API.Auth;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.Net.Http.Headers;
 using Microsoft.OpenApi.Models;
 using System.Net.Mime;
 using System.Reflection;
+using System.Text;
+using DMS.API.Auth;
+using DMS.Data.EF;
+using DMS.Data.EF.Context;
 
 namespace DMS.API.Extension;
 
@@ -47,6 +47,10 @@ public static class AddServiceExtension
         AddJWTToken(services, configuration);
         AddLogging(services);
         AddCORS(services, configuration);
+
+        // The logged-in user for services that record who did something (logs, approvals).
+        services.AddHttpContextAccessor();
+        services.AddScoped<DMS.Application.Interface.ICurrentUser, HttpCurrentUser>();
 
         return services;
     }
@@ -167,7 +171,8 @@ public static class AddServiceExtension
             {
                 policy.WithOrigins(allowedCorsOrigin)
                       .AllowAnyMethod()
-                      .AllowAnyHeader();
+                      .AllowAnyHeader()
+                      .WithExposedHeaders("Content-Disposition"); // so the browser can read a download's file name
             });
         });
     }

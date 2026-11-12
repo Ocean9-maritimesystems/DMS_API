@@ -27,85 +27,68 @@ public class SyncController : ControllerBase
 
     private int VesselId => VesselKeyAttribute.VesselIdOf(HttpContext);
 
-    /// <summary>GET api/Sync/Pull?vesselId=101&amp;since=2026-09-01T00:00:00Z</summary>
-    [HttpGet("Pull")]
-    public async Task<ActionResult<SyncPullResponse>> Pull(int vesselId, DateTime? since)
+    /// <summary>
+    /// GET api/Sync/Changes?max=500: the records changed at the office for this vessel (Sync_ChangeLog), each as it
+    /// is now - same table, key and data (file contents are downloaded on board when first opened).
+    /// </summary>
+    [HttpGet("Changes")]
+    public async Task<ActionResult<SyncChangesResponse>> GetChanges(int max = 500)
     {
-        var result = await _service.PullAsync(VesselId, since ?? DateTime.MinValue);
-        _logger.LogInformation(
-            "Sync pull for vessel {VesselId}: {Manuals} manual(s), {Circulars} circular(s), {Removed} removal(s), more: {HasMore}",
-            VesselId, result.Manuals.Count, result.Circulars.Count,
-            result.DeletedManualIds.Count + result.DeletedCircularIds.Count, result.HasMore);
+        var result = await _service.GetChangesAsync(VesselId, max);
+        if (result == null)
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Row-by-row sync is not set up in the office database (run Database/010_Sync_ChangeLog.sql).");
+        _logger.LogInformation("Sync changes for vessel {VesselId}: {Count} record(s), more: {HasMore}",
+            VesselId, result.Changes.Count, result.HasMore);
         return Ok(result);
     }
+
+    /// <summary>POST api/Sync/ChangesConfirm: the ship has saved these changes (sets Sync_ChangeLog.DownloadedUtc).</summary>
+    [HttpPost("ChangesConfirm")]
+    public async Task<ActionResult<SyncChangesConfirmResult>> ConfirmChanges([FromBody] SyncChangesConfirmRequest request)
+    {
+        return Ok(await _service.ConfirmChangesAsync(VesselId, request.ChangeIds));
+    }
+
+    /// <summary>Largest upload from a vessel in one call (records with their files).</summary>
+    private const long MaxUploadBytes = 300L * 1024 * 1024;
 
     /// <summary>
-    /// POST api/Sync/Confirm: the vessel has applied a pull. Marks the change-table rows it downloaded
-    /// (Sync_Outbox.DownloadedUtc) and confirms the items that pull sent.
+    /// POST api/Sync/Upload: everything made or changed on board (multipart/form-data: an "upload" part with
+    /// SyncUploadRequest as JSON, then one "file" part per file, named by SyncUploadRow.FileRef). The form is read
+    /// here, after the vessel key check, so a refused call never uploads its files.
     /// </summary>
-    [HttpPost("Confirm")]
-    public async Task<ActionResult<SyncConfirmResult>> Confirm([FromBody] SyncConfirmRequest request)
-    {
-        request.VesselID = VesselId;
-        var result = await _service.ConfirmAsync(request);
-        _logger.LogInformation("Sync confirm from vessel {VesselId}: {Count} change row(s) marked downloaded",
-            VesselId, result.Confirmed);
-        return Ok(result);
-    }
-
-    /// <summary>POST api/Sync/Push: acknowledgements made on board.</summary>
-    [HttpPost("Push")]
-    public async Task<ActionResult<SyncPushResult>> Push([FromBody] SyncPushRequest request)
-    {
-        request.VesselID = VesselId;
-        var result = await _service.PushAsync(request);
-        _logger.LogInformation(
-            "Sync push from vessel {VesselId}: {Manual} manual and {Circular} circular acknowledgement(s) stored",
-            VesselId, result.ManualAcksAccepted, result.CircularAcksAccepted);
-        return Ok(result);
-    }
-
-    /// <summary>Largest upload of one document from a vessel (all its files together).</summary>
-    private const long MaxOtherDocumentUploadBytes = 300L * 1024 * 1024;
-
-    /// <summary>
-    /// POST api/Sync/OtherDocument: one other document added on board, with its files (multipart/form-data:
-    /// a "document" part with OtherDocumentPushDto as JSON, then the "files" parts in the same order).
-    /// The form is read here, after the vessel key check, so a refused call never uploads its files.
-    /// </summary>
-    [HttpPost("OtherDocument")]
-    [RequestSizeLimit(MaxOtherDocumentUploadBytes)]
-    [RequestFormLimits(MultipartBodyLengthLimit = MaxOtherDocumentUploadBytes)]
-    public async Task<ActionResult<OtherDocumentPushResult>> PushOtherDocument(CancellationToken ct)
+    [HttpPost("Upload")]
+    [RequestSizeLimit(MaxUploadBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = MaxUploadBytes)]
+    public async Task<ActionResult<SyncUploadResult>> Upload(CancellationToken ct)
     {
         if (!Request.HasFormContentType) return BadRequest("Expected multipart/form-data.");
         var form = await Request.ReadFormAsync(ct);
 
-        OtherDocumentPushDto? doc;
+        SyncUploadRequest? request;
         try
         {
-            doc = System.Text.Json.JsonSerializer.Deserialize<OtherDocumentPushDto>(form["document"].ToString(),
+            request = System.Text.Json.JsonSerializer.Deserialize<SyncUploadRequest>(form["upload"].ToString(),
                 new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         }
         catch (System.Text.Json.JsonException)
         {
-            doc = null;
+            request = null;
         }
-        if (doc == null) return BadRequest("The \"document\" part is missing or not valid JSON.");
+        if (request == null) return BadRequest("The \"upload\" part is missing or not valid JSON.");
 
-        var files = new List<byte[]>();
-        foreach (var f in form.Files.GetFiles("files"))
+        var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var f in form.Files.GetFiles("file"))
         {
             using var ms = new MemoryStream((int)f.Length);
             await f.CopyToAsync(ms, ct);
-            files.Add(ms.ToArray());
+            files[f.FileName] = ms.ToArray();
         }
 
-        var result = await _service.PushOtherDocumentAsync(VesselId, doc, files);
-        _logger.LogInformation(
-            "Sync push from vessel {VesselId}: other document {Number} ({Files} file(s)) {Outcome}",
-            VesselId, doc.DocumentNumber, files.Count,
-            result.Error ?? (result.AlreadyApplied ? "already stored" : $"stored as {result.Document?.OtherDocumentMasterID}"));
+        var result = await _service.UploadAsync(VesselId, request, files);
+        _logger.LogInformation("Sync upload from vessel {VesselId}: {Stored} of {Count} record(s) stored, {Files} file(s)",
+            VesselId, result.Results.Count(r => r.Stored), result.Results.Count, files.Count);
         return Ok(result);
     }
 
@@ -118,12 +101,23 @@ public class SyncController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>GET api/Sync/FeatureFile/{table}/{id}: a suggestion file (SUG_Blob), downloaded when first opened on board.</summary>
+    [HttpGet("FeatureFile/{table}/{id:long}")]
+    public async Task<IActionResult> GetFeatureFile(string table, long id)
+    {
+        var file = await _service.GetFeatureFileAsync(VesselId, table, id);
+        if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
+        return File(file.Value.Bytes, "application/octet-stream", file.Value.FileName);
+    }
+
     /// <summary>GET api/Sync/ManualAttachment/{id}: one file, downloaded when first needed on board.</summary>
     [HttpGet("ManualAttachment/{id:long}")]
     public async Task<IActionResult> GetManualAttachment(long id)
     {
         var file = await _service.GetManualAttachmentBytesAsync(VesselId, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, MimeTypeOrDefault(file.Value.FileType), file.Value.FileName);
     }
 
@@ -133,6 +127,7 @@ public class SyncController : ControllerBase
     {
         var file = await _service.GetCircularAttachmentBytesAsync(VesselId, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, MimeTypeOrDefault(file.Value.FileType), file.Value.FileName);
     }
 
@@ -142,6 +137,7 @@ public class SyncController : ControllerBase
     {
         var file = await _service.GetOtherDocumentFileBytesAsync(VesselId, id);
         if (file == null) return NotFound();
+        if (file.Value.Bytes.Length == 0) return NoContent(); // no file at the office: the ship stops asking
         return File(file.Value.Bytes, MimeTypeOrDefault(file.Value.FileType), file.Value.FileName);
     }
 

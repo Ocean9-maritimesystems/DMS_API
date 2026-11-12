@@ -4,7 +4,7 @@ namespace DMS.Application.DTO.Circulars;
 
 public class Circulars_TreeviewDto
 {
-    public string Key { get; set; }
+    public required string Key { get; set; }
 
     public string Label { get; set; } = null!;
 

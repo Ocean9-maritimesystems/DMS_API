@@ -3,7 +3,7 @@ using DMS.Application.DTO.Manuals;
 
 namespace DMS.Application.Interface;
 
-public interface IDMSService
+public interface IManualService
 {
     public Task<List<Manual_TreeviewDto>> GetTreeViewManualListAsync(string userID);
 
@@ -44,7 +44,7 @@ public interface IDMSService
 
     public Task<List<ManualUserAckList>> GetManualUserAckListAsync(long dm_ManualID);
     
-    public Task<List<ManualNotificationDto>> GetManualNotificationListAsync(int limit);
+    public Task<List<ManualNotificationDto>> GetManualNotificationListAsync(int limit, string userID);
     
     public Task<List<ManualLogDto>> GetManualLogsAsync(long dm_ManualID);
 
@@ -57,13 +57,19 @@ public interface IDMSService
     
     public Task<bool> ApproveManualAsync(ManualApproveDto request, bool isToSendBack);
 
-    public Task DeleteDmManualAsync(long dm_ManualID);
+    /// <summary>Submits a draft for release (or to its first approver).</summary>
+    public Task<bool> PublishManualAsync(ManualApproveDto request);
 
-    public Task DeleteDmManualVersionAsync(long dm_ManualID);
+    public Task DeleteDmManualAsync(long dm_ManualID, string userID);
+
+    /// <summary>Removes the newest, not yet released, version of a manual.</summary>
+    public Task DeleteDmManualVersionAsync(long dm_ManualID, string userID);
 
     public Task AddToFavouriteAsync(long dm_ManualID, string userID);
 
-    public Task<bool> MarkNotificationReadAsync(long notificationID);
+    public Task RemoveFromFavouriteAsync(long dm_ManualID, string userID);
+
+    public Task<bool> MarkNotificationReadAsync(long notificationID, string userID);
 
     public Task<List<ManualVersionHistoryDto>> GetManualVersionHistoryAsync(long dm_ManualID);
 }

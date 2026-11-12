@@ -61,4 +61,13 @@ public partial class CIR_Master
     public DateTime? ModifiedDate { get; set; }
 
     public int? IsDeleted { get; set; }
+
+    /// <summary>Days the vessels have to acknowledge (012_NewFeatures.sql).</summary>
+    public int? AckDueDays { get; set; }
+
+    [Column(TypeName = "datetime")]
+    public DateTime? ValidUntil { get; set; }
+
+    /// <summary>The circular that replaced this one when it was cancelled.</summary>
+    public long? SupersededByID { get; set; }
 }

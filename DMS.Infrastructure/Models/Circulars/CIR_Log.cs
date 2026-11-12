@@ -24,7 +24,7 @@ public partial class CIR_Log
     public DateTime? LogDate { get; set; }
 
     [StringLength(150)]
-    public string Activity { get; set; } = null!;
+    public string? Activity { get; set; }
 
     [StringLength(3000)]
     public string? Remarks { get; set; }
@@ -36,6 +36,8 @@ public partial class CIR_Log
     [Unicode(false)]
     public string? UserName { get; set; }
 
+    // The office table has no Fleet_CrewId column (only the ship keeps it), so EF must not write it.
+    [NotMapped]
     public long? Fleet_CrewId { get; set; }
 
     [StringLength(50)]

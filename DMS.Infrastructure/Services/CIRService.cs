@@ -1,26 +1,37 @@
 using AutoMapper;
 using DMS.Application.DTO.Circulars;
+using DMS.Application.DTO.Features;
 using DMS.Application.Interface;
+using DMS.Data.EF;
 using DMS.Data.EF.Constant;
 using DMS.Data.EF.Context;
+using DMS.Data.EF.Features;
 using DMS.Data.EF.Models.Circulars;
+using DMS.Data.EF.Models.Features;
 using DMS.Data.EF.Query.Circulars;
 using DMS.Infrastructure.Query.Circulars;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using System.Threading;
+using System.Data;
 
 namespace DMS.Application;
 
 public class CIRService : ICIRService
 {
+    private static readonly string[] LinkTypes = { "Amends", "Supersedes", "RefersTo" };
+
     private readonly CircularsContext _dbContext;
+    private readonly DmsContext _dms;
     private readonly IMediator _mediator;
     private readonly CIRGeneralQueries _queries;
     private readonly IMapper _mapper;
+    private readonly AttachmentStorage _storage;
 
-    public CIRService(CircularsContext context, IMediator mediator, CIRGeneralQueries queries, IMapper mapper)
+    public CIRService(CircularsContext context, DmsContext dms, IMediator mediator, CIRGeneralQueries queries, IMapper mapper, AttachmentStorage storage)
     {
+        _dms = dms;
+        _storage = storage;
         _dbContext = context;
         _mediator = mediator;
         _queries = queries;
@@ -91,6 +102,7 @@ public class CIRService : ICIRService
                         parent.Children.Add(child);
                 }
             }
+
         }
 
         return root;
@@ -99,6 +111,32 @@ public class CIRService : ICIRService
     public async Task<List<CIRMasterList>> GetCIRMasterListAsync(string userID, long categoryId, string circularType)
     {
         var cirList = await _queries.GetCIRListAsync(userID, categoryId, circularType);
+
+        // GetCIRMasterList does not return a reliable AttachmentCount, so compute it from CIR_Blob.
+        // A blob row counts only when it still holds a file (removing an attachment on edit keeps the
+        // row but clears FileName/BlobContents). BlobContents is only tested for NULL, never loaded.
+        var masterIds = cirList
+            .Where(c => c.IsCategory == 0 && c.CIR_MasterID > 0)
+            .Select(c => c.CIR_MasterID)
+            .Distinct()
+            .ToList();
+
+        if (masterIds.Count > 0)
+        {
+            var counts = await _dbContext.CIR_Blob
+                .AsNoTracking()
+                .Where(b => b.CIR_MasterID != null
+                            && masterIds.Contains(b.CIR_MasterID.Value)
+                            && (b.BlobContents != null || (b.FileName != null && b.FileName != "")))
+                .GroupBy(b => b.CIR_MasterID!.Value)
+                .Select(g => new { MasterId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.MasterId, x => x.Count);
+
+            foreach (var item in cirList)
+            {
+                item.AttachmentCount = counts.TryGetValue(item.CIR_MasterID, out var count) ? count : 0;
+            }
+        }
 
         return cirList;
     }
@@ -160,11 +198,19 @@ public class CIRService : ICIRService
         return counts;
     }
 
-    public async Task<List<CircularsNotificationDto>> GetCIRNotificationListAsync(int limit)
+    public async Task<List<CircularsNotificationDto>> GetCIRNotificationListAsync(int limit, string userID)
     {
-        var data = await _queries.GetNotificationList();
+        var data = await _queries.GetNotificationList(userID, limit);
 
         var notificationList = _mapper.Map<List<CircularsNotificationDto>>(data);
+
+        // Read/unread is kept per user (Notification_Read); before that table exists, the shared flag is shown.
+        if (await NotificationReads.IsInstalledAsync(_dbContext))
+        {
+            var read = await NotificationReads.ReadIdsAsync(_dbContext, NotificationReads.Circular, userID);
+            foreach (var n in notificationList)
+                n.IsRead = read.Contains(n.CIRNotificationId) ? 1 : 0;
+        }
 
         return notificationList;
     }
@@ -184,7 +230,7 @@ public class CIRService : ICIRService
                    .FirstOrDefaultAsync();
 
         if (cat == null)
-            throw new InvalidOperationException($"Category with ID {categoryId} not found.");
+            throw new KeyNotFoundException($"Category with ID {categoryId} not found.");
 
         var year = DateTime.UtcNow.Year;
         var circularTypePrefix = cat.CircularType == "Circulars" ? "CIR" : "ALT";
@@ -255,6 +301,18 @@ public class CIRService : ICIRService
         }
 
         var circularDto = _mapper.Map<EditCircularDto>(result.Circular);
+
+        // An attachment kept in a local folder or the cloud is loaded from there (BlobTableSettings).
+        if (circularDto.BlobContents == null && !string.IsNullOrEmpty(circularDto.FileName))
+        {
+            var blob = await _dbContext.CIR_Blob.AsNoTracking()
+                .Where(b => b.CIR_BlobID == circularDto.CIR_BlobID)
+                .Select(b => new { b.FileName, b.HQ_Storage_Option, b.HQ_Local_Folder, b.Cloud_ContainerName, b.Cloud_Directory })
+                .FirstOrDefaultAsync();
+            if (blob != null)
+                circularDto.BlobContents = await _storage.ReadAsync(AttachmentStorage.CircularTable, new AttachmentRef(circularDto.CIR_BlobID,
+                    blob.FileName, null, blob.HQ_Storage_Option, blob.HQ_Local_Folder, blob.Cloud_ContainerName, blob.Cloud_Directory));
+        }
         var toAckRows = await _dbContext.CIR_ToAck_Vsl
                             .Where(x =>
                                 x.CIR_MasterID == cirMasterId &&
@@ -298,46 +356,30 @@ public class CIRService : ICIRService
 
     public async Task<long> InsertCIR_MasterRecord(string circularType)
     {
-        try
-        {
-            var cir_Master = new CIR_Master();
-            cir_Master.CIR_MasterID = (_dbContext.CIR_Master
-                                     .Select(m => (long?)m.CIR_MasterID)
-                                     .Max() ?? 0) + 1;
-            cir_Master.Origin = "HQ";
-            cir_Master.VesselID = -1;
-            cir_Master.Status = "Temp";
-            cir_Master.CIR_Number = "Temp";
-            cir_Master.CIR_CategoryID = -1;
-            cir_Master.CircularType = circularType;
-            _dbContext.CIR_Master.Add(cir_Master);
-            await _dbContext.SaveChangesAsync();
+        var cir_Master = new CIR_Master();
+        cir_Master.CIR_MasterID = await _dbContext.NextIdAsync<CIR_Master>();
+        cir_Master.Origin = "HQ";
+        cir_Master.VesselID = -1;
+        cir_Master.Status = "Temp";
+        cir_Master.CIR_Number = "Temp";
+        cir_Master.CIR_CategoryID = -1;
+        cir_Master.CircularType = circularType;
+        _dbContext.CIR_Master.Add(cir_Master);
+        await _dbContext.SaveChangesAsync();
 
-            return cir_Master.CIR_MasterID;
-        }
-        catch (Exception)
-        {
-            throw;
-        }
+        return cir_Master.CIR_MasterID;
     }
 
     public async Task RemoveTempCIRAsync(long cir_MasterID)
     {
-        try
+        var cir_Master = await _dbContext.CIR_Master
+                              .Where(m => m.CIR_MasterID == cir_MasterID)
+                              .OrderByDescending(m => m.CIR_MasterID)
+                              .FirstOrDefaultAsync();
+        if (cir_Master != null)
         {
-            var cir_Master = await _dbContext.CIR_Master
-                                  .Where(m => m.CIR_MasterID == cir_MasterID)
-                                  .OrderByDescending(m => m.CIR_MasterID)
-                                  .FirstOrDefaultAsync();
-            if (cir_Master != null)
-            {
-                _dbContext.CIR_Master.Remove(cir_Master);
-                await _dbContext.SaveChangesAsync();
-            }
-        }
-        catch (Exception)
-        { 
-            throw;
+            _dbContext.CIR_Master.Remove(cir_Master);
+            await _dbContext.SaveChangesAsync();
         }
     }
 
@@ -354,34 +396,35 @@ public class CIRService : ICIRService
 
     public async Task AddToFavouriteAsync(long cir_MasterID, string circularType, string userID)
     {
-        try
+        if (!_dbContext.CIR_UserFavourite.Any(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID))
         {
-            if (!_dbContext.CIR_UserFavourite.Any(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID))
-            {
-                var nextCIR_UserFavouriteID = _dbContext.CIR_UserFavourite
-                                                  .Select(m => (long?)m.CIR_UserFavouriteID)
-                                                  .Max() ?? 0;
+            var nextCIR_UserFavouriteID = await _dbContext.NextIdAsync<CIR_UserFavourite>();
 
-                nextCIR_UserFavouriteID = nextCIR_UserFavouriteID + 1;
+            var userFavourite = new CIR_UserFavourite();
+            userFavourite.CIR_UserFavouriteID = nextCIR_UserFavouriteID;
+            userFavourite.Origin = "HQ";
+            userFavourite.VesselID = -1;
+            userFavourite.CIR_MasterID = cir_MasterID;
+            userFavourite.UserId = userID;
+            userFavourite.IsDisabled = 0;
+            await _dbContext.CIR_UserFavourite.AddAsync(userFavourite);
 
-                var userFavourite = new CIR_UserFavourite();
-                userFavourite.CIR_UserFavouriteID = nextCIR_UserFavouriteID;
-                userFavourite.Origin = "HQ";
-                userFavourite.VesselID = -1;
-                userFavourite.CIR_MasterID = cir_MasterID;
-                userFavourite.UserId = userID;
-                userFavourite.IsDisabled = 0;
-                await _dbContext.CIR_UserFavourite.AddAsync(userFavourite);
+            await _dbContext.SaveChangesAsync();
 
-                await _dbContext.SaveChangesAsync();
-
-                await _queries.AddNotification(cir_MasterID, "", ManualNotificationType.FAVOURITE, circularType + " added as Favourite for user - " + userID, "");
-            }
+            await _queries.AddNotification(cir_MasterID, "", ManualNotificationType.FAVOURITE, circularType + " added as Favourite for user - " + userID, "");
         }
-        catch (Exception)
-        {
-            throw;
-        }
+    }
+
+    public async Task RemoveFromFavouriteAsync(long cir_MasterID, string userID)
+    {
+        var favourite = await _dbContext.CIR_UserFavourite
+            .FirstOrDefaultAsync(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID && (f.IsDisabled ?? 0) == 0);
+
+        if (favourite == null)
+            return;
+
+        favourite.IsDisabled = 1;
+        await _dbContext.SaveChangesAsync();
     }
 
     public async Task<long> UpdateCircularAsync(EditCircularDto editDto)
@@ -394,14 +437,284 @@ public class CIRService : ICIRService
         return result;
     }
 
-    public async Task<bool> MarkNotificationReadAsync(long notificationID)
+    public async Task<bool> MarkNotificationReadAsync(long notificationID, string userID)
     {
         var notification = await _dbContext.CIR_Notification
                                 .FirstOrDefaultAsync(n => n.CIR_NotificationID == notificationID);
         if (notification == null) return false;
 
+        if (await NotificationReads.IsInstalledAsync(_dbContext))
+        {
+            // Read for this user only; others still see it as new.
+            await NotificationReads.MarkReadAsync(_dbContext, NotificationReads.Circular, notificationID, userID);
+            return true;
+        }
+
         notification.IsRead = 1;
         await _dbContext.SaveChangesAsync();
         return true;
     }
+
+    /// <summary>Circular - manual links with the circular's number, title and status; the manual's number and name are added by <see cref="AddManualNamesAsync"/>.</summary>
+    private IQueryable<CircularManualLink> Links(IQueryable<CirManualLink> links)
+        => from l in links
+           join c in _dbContext.CIR_Master on l.CIR_MasterID equals c.CIR_MasterID
+           select new CircularManualLink
+           {
+               CIR_ManualLinkID = l.CIR_ManualLinkID,
+               CIR_MasterID = l.CIR_MasterID,
+               CircularNumber = c.CIR_Number,
+               CircularTitle = c.Title,
+               CircularType = c.CircularType,
+               CircularStatus = c.Status,
+               DM_ManualID = l.DM_ManualID,
+               DM_ManualVersionID = l.DM_ManualVersionID,
+               LinkType = l.LinkType,
+               Remarks = l.Remarks,
+               IsActive = l.IsActive == 1,
+               ClosedOn = l.ClosedOn,
+               CreatedOn = l.CreatedOn,
+           };
+
+    /// <summary>Adds ManualNo / ManualName and drops links whose manual is gone (the old query joined DM_Manual).</summary>
+    private async Task<List<CircularManualLink>> AddManualNamesAsync(List<CircularManualLink> links)
+    {
+        var ids = links.Select(l => l.DM_ManualID).Distinct().ToList();
+        if (ids.Count == 0) return links;
+        var manuals = (await _dms.DmManuals.AsNoTracking()
+                .Where(m => ids.Contains(m.DM_ManualID))
+                .Select(m => new { m.DM_ManualID, m.ManualNo, m.ManualName })
+                .ToListAsync())
+            .GroupBy(m => m.DM_ManualID).ToDictionary(g => g.Key, g => g.First());
+        var result = new List<CircularManualLink>(links.Count);
+        foreach (var link in links)
+        {
+            if (!manuals.TryGetValue(link.DM_ManualID, out var manual)) continue;
+            link.ManualNo = manual.ManualNo;
+            link.ManualName = manual.ManualName;
+            result.Add(link);
+        }
+        return result;
+    }
+
+    public async Task<CircularExtras?> GetCircularesExtraInfoAsync(long circularId)
+    {
+        var extras = await (
+                from c in _dbContext.CIR_Master.AsNoTracking()
+                where c.CIR_MasterID == circularId
+                join s in _dbContext.CIR_Master on c.SupersededByID equals (long?)s.CIR_MasterID into ss
+                from s in ss.DefaultIfEmpty()
+                join cat in _dbContext.CIR_Category on c.CIR_CategoryID equals (long?)cat.CIR_CategoryID into cats
+                from cat in cats.DefaultIfEmpty()
+                select new CircularExtras
+                {
+                    CIR_MasterID = c.CIR_MasterID,
+                    Status = c.Status,
+                    AckDueDays = c.AckDueDays,
+                    ValidUntil = c.ValidUntil,
+                    SupersededByID = c.SupersededByID,
+                    SupersededByNumber = s.CIR_Number,
+                    RequiresValidUntil = cat != null && cat.RequiresValidUntil == 1,
+                })
+            .FirstOrDefaultAsync();
+        if (extras == null) return null;
+
+        var links = await Links(_dbContext.CirManualLinks.AsNoTracking().Where(l => l.CIR_MasterID == circularId)).ToListAsync();
+        extras.Links = (await AddManualNamesAsync(links))
+            .OrderByDescending(l => l.IsActive).ThenBy(l => l.ManualNo).ToList();
+        return extras;
+    }
+
+    public async Task<string?> SaveCircularesExtraInfoAsync(long circularId, SaveCircularExtras request)
+    {
+        var circular = await _dbContext.CIR_Master.FirstOrDefaultAsync(m => m.CIR_MasterID == circularId);
+        if (circular == null) return "Circular not found.";
+        if (request.AckDueDays is < 0 or > 3650) return "Acknowledge-by days must be between 0 and 3650.";
+        circular.AckDueDays = request.AckDueDays;
+        circular.ValidUntil = request.ValidUntil?.Date;
+        await _dbContext.SaveChangesAsync();
+        return null;
+    }
+
+    public async Task<string?> AddManualLinkAsync(long circularId, AddManualLink request, OfficeUser user)
+    {
+        if (!LinkTypes.Contains(request.LinkType)) return "Link type must be Amends, Supersedes or RefersTo.";
+        if (!await _dbContext.CIR_Master.AnyAsync(m => m.CIR_MasterID == circularId))
+            return "Circular not found.";
+        if (!await _dms.DmManuals.AnyAsync(m => m.DM_ManualID == request.ManualId && (m.IsDeleted ?? 0) != 1))
+            return "Manual not found.";
+        if (await _dbContext.CirManualLinks.AnyAsync(l => l.CIR_MasterID == circularId && l.DM_ManualID == request.ManualId && l.IsActive == 1))
+            return "This manual is already linked.";
+
+        _dbContext.CirManualLinks.Add(new CirManualLink
+        {
+            CIR_ManualLinkID = await _dbContext.NextIdAsync("CIR_ManualLink"),
+            Origin = "HQ",
+            VesselID = -1,
+            CIR_MasterID = circularId,
+            DM_ManualID = request.ManualId,
+            DM_ManualVersionID = request.ManualVersionId,
+            LinkType = request.LinkType,
+            Remarks = Cut(request.Remarks, 500),
+            IsActive = 1,
+            CreatedBy = user.UserId,
+            CreatedOn = DateTime.UtcNow,
+        });
+        await _dbContext.SaveChangesAsync();
+        return null;
+    }
+
+    public Task RemoveManualLinkAsync(long linkId)
+        => _dbContext.CirManualLinks.Where(l => l.CIR_ManualLinkID == linkId).ExecuteDeleteAsync();
+
+    public async Task<string?> CancelCircularAsync(long circularId, CancelCircular request, OfficeUser user)
+    {
+        var current = await _dbContext.CIR_Master.FirstOrDefaultAsync(m => m.CIR_MasterID == circularId);
+        if (current == null) return "Circular not found.";
+        var status = current.Status;
+        if (status == "Cancelled") return "This circular is already cancelled.";
+        if (status == "Temp") return "Save the circular before cancelling it.";
+        // A draft can be cancelled too: it was never sent, so the vessels are not told (TR_CIR_Master_Inbox, 018).
+        if (request.SupersededById == circularId) return "A circular cannot supersede itself.";
+        if (request.SupersededById != null && !await _dbContext.CIR_Master.AnyAsync(m => m.CIR_MasterID == request.SupersededById && (m.IsDeleted ?? 0) != 1))
+            return "The superseding circular was not found.";
+        var remarks = string.IsNullOrWhiteSpace(request.Reason) ? null : $"Cancelled by {user.UserName}: {request.Reason.Trim()}";
+
+        current.Status = "Cancelled";
+        current.SupersededByID = request.SupersededById;
+        current.ModifiedBy = user.UserId;
+        current.ModifiedDate = DateTime.UtcNow;
+        if (!string.IsNullOrWhiteSpace(remarks))
+        {
+            var combined = (current.Remarks ?? string.Empty) + (string.IsNullOrEmpty(current.Remarks) ? string.Empty : "\r\n") + remarks;
+            current.Remarks = combined.Length <= 4000 ? combined : combined.Substring(0, 4000);
+        }
+        await _dbContext.SaveChangesAsync();
+        return null;
+    }
+
+    /// <summary>
+    /// Releases a draft: Status Draft -> Active and ReleasedDate = now. From then on the circular is sent to the
+    /// vessels with the sync, appears in their inbox (TR_CIR_Master_Inbox, 012) and in pending acknowledgements,
+    /// and its manual links count as open amendments. A released circular can only be cancelled or superseded.
+    /// </summary>
+    public async Task<string?> ReleaseCircularAsync(long circularId, OfficeUser user)
+    {
+        var current = await _dbContext.CIR_Master.FirstOrDefaultAsync(m => m.CIR_MasterID == circularId);
+        if (current == null || (current.IsDeleted ?? 0) == 1) return "Circular not found.";
+        if (current.Status == "Temp") return "Save the circular before releasing it.";
+        if (current.Status != "Draft") return $"Only a draft can be released; this one is {current.Status ?? "already released"}.";
+        if (string.IsNullOrWhiteSpace(current.Title)) return "Give the circular a title before releasing it.";
+        if (current.CIR_CategoryID == null) return "Choose a category before releasing the circular.";
+
+        current.Status = "Active";
+        current.ReleasedDate = DateTime.Now;
+        current.ModifiedBy = user.UserId;
+        current.ModifiedDate = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync();
+
+        var type = string.IsNullOrWhiteSpace(current.CircularType) ? "Circular" : current.CircularType;
+        await _queries.AddToLog(circularId, $"{type} Released", $"{type}: {current.CIR_Number} released by {user.UserName}");
+        return null;
+    }
+
+    /// <summary>
+    /// "Save and release" from the Edit Circular form: the same save as EditCircular, then Draft -> Active.
+    /// Everything that would stop the release is checked first, so a refused release leaves the circular unchanged.
+    /// </summary>
+    public async Task<string?> SaveAndReleaseCircularAsync(EditCircularDto editDto, OfficeUser user)
+    {
+        if (editDto is null) return "Circular payload is required.";
+
+        var current = await _dbContext.CIR_Master.AsNoTracking()
+            .Where(m => m.CIR_MasterID == editDto.CIR_MasterID)
+            .Select(m => new { m.Status, m.IsDeleted })
+            .FirstOrDefaultAsync();
+        if (current == null || (current.IsDeleted ?? 0) == 1) return "Circular not found.";
+        if (current.Status != "Draft")
+            return $"Only a draft can be released; this one is {current.Status ?? "already released"}. Use Save instead.";
+        if (string.IsNullOrWhiteSpace(editDto.Title)) return "Give the circular a title before releasing it.";
+        if (editDto.CIR_CategoryID <= 0) return "Choose a category before releasing the circular.";
+
+        // Saved as a draft first (the form's other changes), then released.
+        editDto.Status = "Draft";
+        editDto.ReleasedDate = null;
+        await UpdateCircularAsync(editDto);
+        return await ReleaseCircularAsync(editDto.CIR_MasterID, user);
+    }
+
+    public async Task<List<CircularManualLink>> GetForManualAsync(long manualId)
+    {
+        // Draft circulars are listed too (the page marks them "Draft"), so a link made while the circular is
+        // still being written shows on the manual at once. Temp rows (unsaved) are left out.
+        var links = await (
+                from l in _dbContext.CirManualLinks.AsNoTracking()
+                join c in _dbContext.CIR_Master on l.CIR_MasterID equals c.CIR_MasterID
+                where l.DM_ManualID == manualId && (c.IsDeleted ?? 0) != 1 && (c.Status ?? "") != "Temp"
+                orderby l.IsActive descending, (c.ReleasedDate ?? c.DateIssued) descending
+                select new CircularManualLink
+                {
+                    CIR_ManualLinkID = l.CIR_ManualLinkID,
+                    CIR_MasterID = l.CIR_MasterID,
+                    CircularNumber = c.CIR_Number,
+                    CircularTitle = c.Title,
+                    CircularType = c.CircularType,
+                    CircularStatus = c.Status,
+                    DM_ManualID = l.DM_ManualID,
+                    DM_ManualVersionID = l.DM_ManualVersionID,
+                    LinkType = l.LinkType,
+                    Remarks = l.Remarks,
+                    IsActive = l.IsActive == 1,
+                    ClosedOn = l.ClosedOn,
+                    CreatedOn = l.CreatedOn,
+                })
+            .ToListAsync();
+        return await AddManualNamesAsync(links);   // keeps the order
+    }
+
+    public async Task<int> CloseLinksForManualAsync(long manualId)
+    {
+        // Only links of circulars that were actually released: a draft's amendment cannot have been taken in yet.
+        var now = DateTime.UtcNow;
+        return await _dbContext.CirManualLinks
+            .Where(l => l.DM_ManualID == manualId && l.IsActive == 1 && (l.LinkType == "Amends" || l.LinkType == "Supersedes")
+                        && _dbContext.CIR_Master.Any(c => c.CIR_MasterID == l.CIR_MasterID
+                                                          && (c.Status ?? "") != "Temp" && (c.Status ?? "") != "Draft"))
+            .ExecuteUpdateAsync(u => u.SetProperty(l => l.IsActive, 0).SetProperty(l => l.ClosedOn, now));
+    }
+
+    public Task<List<CircularCategorySetting>> GetCategoriesAsync()
+        => _dbContext.CIR_Category.AsNoTracking()
+            .Where(c => (c.isActive ?? 1) == 1)
+            .OrderBy(c => c.CircularType).ThenBy(c => c.Sortorder).ThenBy(c => c.Category)
+            .Select(c => new CircularCategorySetting
+            {
+                CIR_CategoryID = c.CIR_CategoryID,
+                CircularType = c.CircularType,
+                CategoryCode = c.CategoryCode,
+                Category = c.Category,
+                RequiresValidUntil = c.RequiresValidUntil == 1,
+            })
+            .ToListAsync();
+
+    public Task SaveCategoryAsync(long categoryId, bool requiresValidUntil)
+        => _dbContext.CIR_Category.Where(c => c.CIR_CategoryID == categoryId)
+            .ExecuteUpdateAsync(u => u.SetProperty(c => c.RequiresValidUntil, requiresValidUntil ? 1 : 0));
+
+    public Task<ManualExtras?> GetManualAsync(long manualId)
+        => _dms.DmManuals.AsNoTracking()
+            .Where(m => m.DM_ManualID == manualId)
+            .Select(m => new ManualExtras { DM_ManualID = m.DM_ManualID, AckDueDays = m.AckDueDays })
+            .FirstOrDefaultAsync();
+
+    public Task SaveManualAsync(long manualId, int? ackDueDays)
+    {
+        int? days = ackDueDays is null ? null : Math.Clamp(ackDueDays.Value, 0, 3650);
+        return _dms.DmManuals.Where(m => m.DM_ManualID == manualId)
+            .ExecuteUpdateAsync(u => u.SetProperty(m => m.AckDueDays, days));
+    }
+
+    private static string? Cut(string? s, int max) => string.IsNullOrWhiteSpace(s) ? null : s.Trim().Length <= max ? s.Trim() : s.Trim()[..max];
+
+
 }

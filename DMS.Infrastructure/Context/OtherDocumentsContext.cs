@@ -16,25 +16,27 @@ public partial class OtherDocumentsContext : DbContext
 
     public virtual DbSet<OtherDocumentMaster> OtherDocumentMaster { get; set; } = null!;
 
+    public virtual DbSet<OtherDocument_Folder> OtherDocument_Folder { get; set; } = null!;
+
     public virtual DbSet<OtherDocument_Blob> OtherDocument_Blob { get; set; } = null!;
 
     public virtual DbSet<OtherDocument_Type> OtherDocument_Type { get; set; } = null!;
 
     public virtual DbSet<OtherDocument_Log> OtherDocument_Log { get; set; } = null!;
 
-    public virtual DbSet<OtherDocument_UserFavourite> OtherDocument_UserFavourite { get; set; }
+    public virtual DbSet<OtherDocument_UserFavourite> OtherDocument_UserFavourite { get; set; } = null!;
 
-    public virtual DbSet<OtherDocument_Settings> OtherDocument_Settings { get; set; }
+    public virtual DbSet<OtherDocument_Settings> OtherDocument_Settings { get; set; } = null!;
 
-    public virtual DbSet<OtherDocument_Notification> OtherDocument_Notification { get; set; }
+    public virtual DbSet<OtherDocument_Notification> OtherDocument_Notification { get; set; } = null!;
 
     public virtual DbSet<Vw_OtherDocument_MasterBlob> Vw_OtherDocument { get; set; } = null!;
 
-    public virtual DbSet<VwOtherDocumentNotification> VwOtherDocumentNotification { get; set; }
+    public virtual DbSet<VwOtherDocumentNotification> VwOtherDocumentNotification { get; set; } = null!;
 
-    public virtual DbSet<OtherDocumentList> OtherDocumentList { get; set; }
+    public virtual DbSet<OtherDocumentList> OtherDocumentList { get; set; } = null!;
 
-    public virtual DbSet<OtherDocumentChart> OtherDocumentChart { get; set; }
+    public virtual DbSet<OtherDocumentChart> OtherDocumentChart { get; set; } = null!;
 
     public virtual DbSet<OtherDocumentRecentList> OtherDocumentRecentList { get; set; } = null!;
 
@@ -55,6 +57,12 @@ public partial class OtherDocumentsContext : DbContext
             entity.Property(e => e.OtherDocument_TypeID);
             entity.Property(e => e.UploadedOn).HasColumnType("datetime").HasDefaultValueSql("(getdate())");
             entity.Property(e => e.UploadedBy).HasMaxLength(150).HasDefaultValue("");
+        });
+
+        modelBuilder.Entity<OtherDocument_Folder>(entity =>
+        {
+            entity.HasKey(e => e.OtherDocument_FolderID).HasName("PK_OtherDocument_Folder");
+            entity.Property(e => e.OtherDocument_FolderID).ValueGeneratedNever();
         });
 
         modelBuilder.Entity<OtherDocument_Blob>(entity =>

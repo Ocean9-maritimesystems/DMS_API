@@ -144,9 +144,7 @@ namespace DMS.Data.EF.Handler
             #endregion
 
             //Insert Manual
-            dmManual.DM_ManualID = (_dbContext.DmManuals
-                                 .Select(m => (long?)m.DM_ManualID)
-                                 .Max() ?? 0) + 1;
+            dmManual.DM_ManualID = await _dbContext.NextIdAsync<DmManual>(ct: cancellationToken);
             dmManual.Origin = "HQ";
             dmManual.VesselID = -1;
             dmManual.ManualNo = nextManualNo;
@@ -202,9 +200,7 @@ namespace DMS.Data.EF.Handler
             // Insert Manual Version
             var dmManualVersion = _mapper.Map<DmManualVersion>(request.Manual);
 
-            dmManualVersion.DM_ManualVersionID = (_dbContext.DmManualVersions
-                                 .Select(m => (long?)m.DM_ManualVersionID)
-                                 .Max() ?? 0) + 1;
+            dmManualVersion.DM_ManualVersionID = await _dbContext.NextIdAsync<DmManualVersion>(ct: cancellationToken);
             dmManualVersion.DM_ManualID = dmManual.DM_ManualID;
             dmManualVersion.Origin = "HQ";
             dmManualVersion.VesselID = -1;

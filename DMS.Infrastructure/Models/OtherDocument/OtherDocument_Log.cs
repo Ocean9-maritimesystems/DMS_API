@@ -36,8 +36,6 @@ public partial class OtherDocument_Log
     [Unicode(false)]
     public string? UserName { get; set; }
 
-    public long? Fleet_CrewId { get; set; }
-
     [StringLength(50)]
     [Unicode(false)]
     public string? UserRank { get; set; }

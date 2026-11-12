@@ -36,7 +36,7 @@ public partial class DmManualApprovedList
 
     [StringLength(50)]
     [Unicode(false)]
-    public string HQDept { get; set; } = null!;
+    public string? HQDept { get; set; }
 
     [Column(TypeName = "datetime")]
     public DateTime? ApprovedDate { get; set; }
@@ -44,4 +44,11 @@ public partial class DmManualApprovedList
     [StringLength(250)]
     [Unicode(false)]
     public string? Comments { get; set; }
+
+    /// <summary>The manual version the approval was given for (015_BackendFixes.sql).</summary>
+    [Column("DM_ManualVersionID")]
+    public long? DM_ManualVersionID { get; set; }
+
+    /// <summary>1 = the version was sent back or deleted; the approval no longer counts.</summary>
+    public int? IsVoid { get; set; }
 }

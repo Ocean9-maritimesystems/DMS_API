@@ -1,7 +1,9 @@
 ﻿using DMS.Application;
 using DMS.Application.Interface;
+using DMS.Data.EF.Features;
 using DMS.Data.EF.Query.Circulars;
 using DMS.Data.EF.Query.Manuals;
+using DMS.Infrastructure.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -35,13 +37,23 @@ public static class ConfigrationRepositorys
 
     public static IServiceCollection RepositorysDependencyRegister(this IServiceCollection service)
     {
-        service.AddScoped<IDMSService, DMSService>();
+        service.AddScoped<IManualService, ManualService>();
         service.AddScoped<ICIRService, CIRService>();
         service.AddScoped<IOtherDocumentService, OtherDocumentService>();
         service.AddScoped<IVesselService, VesselService>();
         service.AddScoped<ISyncService, SyncService>();
         service.AddScoped<IHQUserService, HQUserService>();
         service.AddScoped<ILoginService, LoginService>();
+
+        // New features (Database/012_NewFeatures.sql)
+        service.AddScoped<SqlDb>();
+        // Attachment files kept in the database, a local folder or the cloud (dbo.BlobTableSettings).
+        service.AddScoped<AttachmentStorage>();
+        service.AddScoped<IAckDashboardService, AckDashboardService>();
+        service.AddScoped<ISuggestionService, SuggestionService>();
+        service.AddScoped<ISearchService, SearchService>();
+        service.AddScoped<IInboxService, InboxService>();
+        service.AddScoped<IReportService, ReportService>();
         return service;
     }
 }

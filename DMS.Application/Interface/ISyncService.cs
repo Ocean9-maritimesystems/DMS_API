@@ -15,26 +15,24 @@ public interface ISyncService
     Task<bool> ValidateVesselKeyAsync(int vesselId, string key);
 
     /// <summary>
-    /// What this vessel has not received yet: new or changed items, removals, and the crew and
-    /// category lists when they changed. Items sent in the previous pull (the one "since" refers to)
-    /// are marked as received first.
+    /// Stores everything a vessel sent (api/Sync/Upload): acknowledgements, documents and their files, folders, the
+    /// document log, suggestions, read marks. <paramref name="files"/>: the file parts by name (SyncUploadRow.FileRef).
+    /// Safe to repeat. Each record gets its own result, so one the office refuses never holds up the rest.
     /// </summary>
-    Task<SyncPullResponse> PullAsync(int vesselId, DateTime since);
+    Task<SyncUploadResult> UploadAsync(int vesselId, SyncUploadRequest request, IReadOnlyDictionary<string, byte[]> files);
+
+    /// <summary>The contents of a SUG_Blob row for this vessel (or all vessels); null when not its file.</summary>
+    Task<(byte[] Bytes, string? FileName)?> GetFeatureFileAsync(int vesselId, string table, long blobId);
 
     /// <summary>
-    /// Called by the vessel after applying a pull: sets the DownloadedUtc marker on the change-table rows it
-    /// downloaded, and confirms everything that pull sent as on board. Safe to repeat.
+    /// Row-by-row sync (Database/010_Sync_ChangeLog.sql): up to <paramref name="max"/> records changed at the office
+    /// for this vessel, each read as it is now by its key (same table, key and data; file contents left out).
+    /// Null when 010 has not been run.
     /// </summary>
-    Task<SyncConfirmResult> ConfirmAsync(SyncConfirmRequest request);
+    Task<SyncChangesResponse?> GetChangesAsync(int vesselId, int max);
 
-    /// <summary>Stores acknowledgements made on board. Safe to repeat: an acknowledgement already stored is skipped.</summary>
-    Task<SyncPushResult> PushAsync(SyncPushRequest request);
-
-    /// <summary>
-    /// Stores one other document added on board, with its files (in the order of doc.Files). Safe to repeat: a
-    /// document this vessel already sent (same type and number) is returned as it is, not stored again.
-    /// </summary>
-    Task<OtherDocumentPushResult> PushOtherDocumentAsync(int vesselId, OtherDocumentPushDto doc, IReadOnlyList<byte[]> files);
+    /// <summary>The ship has saved these changes: sets DownloadedUtc on its Sync_ChangeLog rows. Safe to repeat.</summary>
+    Task<SyncChangesConfirmResult> ConfirmChangesAsync(int vesselId, IReadOnlyCollection<long> changeIds);
 
     /// <summary>Records the vessel's report (pending acknowledgements, current activity, errors).</summary>
     Task HeartbeatAsync(SyncHeartbeatRequest request);
@@ -57,4 +55,7 @@ public interface ISyncService
     /// removed), as (ItemType, ItemID) with ItemType "Manual" or "Circular". Empty when the sync tables are not installed.
     /// </summary>
     Task<Dictionary<int, HashSet<(string ItemType, long ItemId)>>> GetQueuedItemsAsync(IReadOnlyCollection<int> vesselIds);
+
+    /// <summary>Per vessel, the number of changes (records of any synced table) waiting for its next sync.</summary>
+    Task<Dictionary<int, int>> GetWaitingChangesAsync(IReadOnlyCollection<int> vesselIds);
 }

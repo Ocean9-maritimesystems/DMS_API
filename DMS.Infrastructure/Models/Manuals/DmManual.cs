@@ -41,9 +41,9 @@ public partial class DmManual
 
     public int? IsAcknowledgementRequired { get; set; }
 
-    public int CanExport { get; set; }
+    public int? CanExport { get; set; }
 
-    public int IsApprovalRequired { get; set; }
+    public int? IsApprovalRequired { get; set; }
 
     public int? Approval_FlowID { get; set; }
 
@@ -74,4 +74,7 @@ public partial class DmManual
     public DateTime? ModifiedDate { get; set; }
 
     public int? IsDeleted { get; set; }
+
+    /// <summary>Days the vessels have to acknowledge (012_NewFeatures.sql).</summary>
+    public int? AckDueDays { get; set; }
 }

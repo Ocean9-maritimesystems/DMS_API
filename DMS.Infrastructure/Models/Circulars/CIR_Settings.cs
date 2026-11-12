@@ -4,7 +4,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace DMS.Data.EF.Models.Circulars;
 
-[Table("CIR_Setting")]
+[Table("CIR_Settings")]
 public partial class CIR_Settings
 {
     [Key]

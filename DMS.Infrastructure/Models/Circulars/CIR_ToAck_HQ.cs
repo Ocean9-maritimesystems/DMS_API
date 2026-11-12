@@ -22,11 +22,11 @@ public partial class CIR_ToAck_HQ
     public long CIR_MasterID { get; set; }
 
     [Column("HQ_UsersID")]
-    public long HqUsersId { get; set; }
+    public long? HqUsersId { get; set; }
 
     [StringLength(50)]
     [Unicode(false)]
-    public string Role { get; set; } = null!;
+    public string? Role { get; set; }
 
     public int? IsActive { get; set; }
 }
