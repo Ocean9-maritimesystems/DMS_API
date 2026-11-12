@@ -35,6 +35,18 @@ public class UpdateCircularsCommandHandler : IRequestHandler<UpdateCircularsComm
         b.VSL_Local_Folder = s.VSL_Local_Folder;
     }
 
+    /// <summary>Whether the edit sends back the file already stored for this circular (same name, same bytes).</summary>
+    private async Task<bool> IsSameFileAsync(CIR_Blob blob, DMS.Application.DTO.Circulars.EditCircularDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(blob.FileName) || dto.BlobContents == null
+            || !string.Equals((dto.FileName ?? "").Trim(), blob.FileName.Trim(), StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (blob.BlobSize is { } size && size > 0 && size != dto.BlobContents.Length) return false;
+        var stored = await _storage.ReadAsync(AttachmentStorage.CircularTable, new AttachmentRef(blob.CIR_BlobID, blob.FileName,
+            blob.BlobContents, blob.HQ_Storage_Option, blob.HQ_Local_Folder, blob.Cloud_ContainerName, blob.Cloud_Directory), ct);
+        return stored != null && stored.AsSpan().SequenceEqual(dto.BlobContents);
+    }
+
     /// <summary>A new CIR_Blob row for this circular, its file saved as BlobTableSettings says.</summary>
     private async Task AddBlobAsync(DMS.Application.DTO.Circulars.EditCircularDto dto, CancellationToken ct)
     {
@@ -51,6 +63,7 @@ public class UpdateCircularsCommandHandler : IRequestHandler<UpdateCircularsComm
             BlobSize = dto.BlobSize,
             AddedOn = DateTime.UtcNow
         };
+        if (dto.BlobContents is { Length: > 0 }) FileRules.Check(newBlob.FileName);
         Apply(newBlob, await _storage.SaveAsync(AttachmentStorage.CircularTable, newBlob.CIR_BlobID, newBlob.FileName, dto.BlobContents, ct));
         await _context.CIR_Blob.AddAsync(newBlob, ct);
     }
@@ -91,8 +104,14 @@ public class UpdateCircularsCommandHandler : IRequestHandler<UpdateCircularsComm
             if (blob != null)
             {
                 var oldFile = RefOf(blob);
-                if (dto.BlobContents != null && dto.BlobContents.Length > 0)
+                if (dto.BlobContents is { Length: > 0 } && await IsSameFileAsync(blob, dto, cancellationToken))
                 {
+                    // The same file sent back with the form (an older page does that): nothing to save. Saving it again
+                    // gave it a new AddedOn, and every vessel then downloaded the whole file again.
+                }
+                else if (dto.BlobContents != null && dto.BlobContents.Length > 0)
+                {
+                    FileRules.Check(dto.FileName);
                     blob.BlobSize = dto.BlobSize;
                     blob.FileName = dto.FileName;
                     blob.FileType = dto.FileType;
@@ -103,8 +122,15 @@ public class UpdateCircularsCommandHandler : IRequestHandler<UpdateCircularsComm
                     // The previous file, when it was kept somewhere else (another name, folder or container).
                     if (oldFile != RefOf(blob)) oldFiles.Add(oldFile);
                 }
+                else if (!string.IsNullOrWhiteSpace(dto.FileName) && !string.IsNullOrWhiteSpace(blob.FileName)
+                         && string.Equals(dto.FileName.Trim(), blob.FileName.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    // No contents, but the form still has this file: only the other fields were edited. The stored file
+                    // stays exactly as it is (contents, size, AddedOn), so the vessels do not download it again.
+                }
                 else
                 {
+                    // No file any more (removed in the form: empty file name).
                     oldFiles.Add(oldFile);
                     blob.FileName = null;
                     blob.FileType = null;
@@ -188,7 +214,8 @@ public class UpdateCircularsCommandHandler : IRequestHandler<UpdateCircularsComm
         }
         // --- End new to-ack handling ---
 
-        await _context.SaveChangesAsync(cancellationToken);
+        // A failed save also removes a new file just stored in a local folder or the cloud.
+        await _storage.SaveOrDiscardAsync(() => _context.SaveChangesAsync(cancellationToken));
 
         foreach (var stale in oldFiles)
             await _storage.DeleteAsync(AttachmentStorage.CircularTable, stale, cancellationToken);

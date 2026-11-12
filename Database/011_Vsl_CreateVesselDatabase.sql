@@ -27,6 +27,11 @@
 
    Crew passwords are copied as the office holds them (plain text); login on board compares them as they are.
 
+   Collation: every STRING_AGG below has COLLATE CATALOG_DEFAULT on its value and its separator. Names read from
+   sys.* views carry the catalog collation, which in a contained database (a .bacpac imported from Azure SQL) is
+   Latin1_General_100_CI_AS_KS_WS_SC and differs from the database collation; without it the procedure cannot be
+   created there ("Msg 4191 Cannot resolve collation conflict for string_agg operation"). Keep it on any new STRING_AGG.
+
    Usage:
      EXEC dbo.Vsl_CreateVesselDatabase @VesselID = 101;                                   -- DMS_Vessel_101
      EXEC dbo.Vsl_CreateVesselDatabase @VesselID = 101, @DatabaseName = N'DMS_Vessel'
@@ -139,7 +144,7 @@ BEGIN
                        + CASE WHEN c.collation_name IS NOT NULL THEN N' COLLATE ' + c.collation_name ELSE N'' END
                        + CASE WHEN c.is_nullable = 1 THEN N' NULL' ELSE N' NOT NULL' END
                        + ISNULL(N' CONSTRAINT ' + QUOTENAME(dc.name) + N' DEFAULT ' + dc.definition, N'')
-                   END AS nvarchar(max)), N',' + CHAR(10) + N'    ') WITHIN GROUP (ORDER BY c.column_id)
+                   END AS nvarchar(max)) COLLATE CATALOG_DEFAULT, (N',' + CHAR(10) + N'    ') COLLATE CATALOG_DEFAULT) WITHIN GROUP (ORDER BY c.column_id)
           FROM sys.columns c
           JOIN sys.types ty ON ty.user_type_id = c.system_type_id AND ty.user_type_id = ty.system_type_id
           LEFT JOIN sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
@@ -149,7 +154,7 @@ BEGIN
         -- Primary key, as at the office.
         SELECT @pk = N',' + CHAR(10) + N'    CONSTRAINT ' + QUOTENAME(k.name) + N' PRIMARY KEY '
                    + CASE WHEN i.type = 1 THEN N'CLUSTERED' ELSE N'NONCLUSTERED' END + N' ('
-                   + STRING_AGG(QUOTENAME(c.name) + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END, N', ')
+                   + STRING_AGG((QUOTENAME(c.name) + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END) COLLATE CATALOG_DEFAULT, N', ' COLLATE CATALOG_DEFAULT)
                          WITHIN GROUP (ORDER BY ic.key_ordinal) + N')'
           FROM sys.key_constraints k
           JOIN sys.indexes i        ON i.object_id = k.parent_object_id AND i.index_id = k.unique_index_id
@@ -166,10 +171,10 @@ BEGIN
         SET @pk = NULL;
 
         -- The records: VesselID -1 and this vessel (all records when the table has no VesselID column).
-        SELECT @cols   = STRING_AGG(CAST(QUOTENAME(c.name) AS nvarchar(max)), N', ') WITHIN GROUP (ORDER BY c.column_id),
+        SELECT @cols   = STRING_AGG(CAST(QUOTENAME(c.name) AS nvarchar(max)) COLLATE CATALOG_DEFAULT, N', ' COLLATE CATALOG_DEFAULT) WITHIN GROUP (ORDER BY c.column_id),
                @select = STRING_AGG(CAST(CASE WHEN @IncludeFiles = 0 AND ty.name IN (N'varbinary', N'image') AND c.max_length = -1
                                               AND c.is_nullable = 1
-                                         THEN N'NULL' ELSE QUOTENAME(c.name) END AS nvarchar(max)), N', ')
+                                         THEN N'NULL' ELSE QUOTENAME(c.name) END AS nvarchar(max)) COLLATE CATALOG_DEFAULT, N', ' COLLATE CATALOG_DEFAULT)
                         WITHIN GROUP (ORDER BY c.column_id)
           FROM sys.columns c
           JOIN sys.types ty ON ty.user_type_id = c.system_type_id AND ty.user_type_id = ty.system_type_id
@@ -206,8 +211,9 @@ SET @rows = @@ROWCOUNT;';
     /* ---- 3b. Every stored procedure of the office, so the ship database has the same ones ------------------ */
     -- Same definition as here. First the table types they take as parameters (e.g. Sync_RowList), then the
     -- procedures. One that cannot be made on the ship is listed and skipped; the others still go. Procedures
-    -- already there (Proc_NextID) are kept. Step 5 runs the copied Ship_CreateLogTriggers; the vessel API replaces
-    -- its own Ship_* procedures with its build's versions at every start.
+    -- already there (Proc_NextID) are kept. Step 5 runs the copied Ship_CreateLogTriggers. The Ship_* procedures are
+    -- copied as they are in THIS office database (the vessel API only checks they exist), so run 031_Ship_SyncTables.sql
+    -- here before making a vessel database, or the ship gets an older Ship_ApplyRowChange.
     IF @CopyProcedures = 1
     BEGIN
         DECLARE @objName sysname, @objId int, @def nvarchar(max), @exists bit, @pkCols nvarchar(max),
@@ -231,12 +237,12 @@ SET @rows = @@ROWCOUNT;';
                             WHEN st.name IN (N'datetime2', N'time', N'datetimeoffset')
                                 THEN st.name + N'(' + CAST(c.scale AS nvarchar(5)) + N')'
                             ELSE st.name END +
-                       CASE WHEN c.is_nullable = 1 THEN N' NULL' ELSE N' NOT NULL' END AS nvarchar(max)), N', ')
+                       CASE WHEN c.is_nullable = 1 THEN N' NULL' ELSE N' NOT NULL' END AS nvarchar(max)) COLLATE CATALOG_DEFAULT, N', ' COLLATE CATALOG_DEFAULT)
                        WITHIN GROUP (ORDER BY c.column_id)
               FROM sys.columns c
               JOIN sys.types st ON st.user_type_id = c.user_type_id
              WHERE c.object_id = @objId;
-            SELECT @pkCols = STRING_AGG(CAST(QUOTENAME(c.name) AS nvarchar(max)), N', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
+            SELECT @pkCols = STRING_AGG(CAST(QUOTENAME(c.name) AS nvarchar(max)) COLLATE CATALOG_DEFAULT, N', ' COLLATE CATALOG_DEFAULT) WITHIN GROUP (ORDER BY ic.key_ordinal)
               FROM sys.indexes i
               JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
               JOIN sys.columns c        ON c.object_id = ic.object_id AND c.column_id = ic.column_id
@@ -288,7 +294,7 @@ SET @rows = @@ROWCOUNT;';
 
     -- Tables the ship app reads that were not in the IsForVsl list.
     DECLARE @missing nvarchar(max);
-    SELECT @missing = STRING_AGG(n.TableName, N', ')
+    SELECT @missing = STRING_AGG(n.TableName COLLATE CATALOG_DEFAULT, N', ' COLLATE CATALOG_DEFAULT)
       FROM (VALUES (N'V_Vessel'), (N'DM_Status'), (N'DM_Settings'), (N'CIR_Settings'), (N'Vsl_Staff'), (N'DM_Category'),
                    (N'DM_Manual'), (N'DM_ManualVersion'), (N'DM_Manual_Attachments'), (N'DM_Manual_ToAck_Vsl'),
                    (N'DM_Manual_UserAck'), (N'CIR_Category'), (N'CIR_Master'), (N'CIR_Blob'), (N'CIR_ToAck_Vsl'),

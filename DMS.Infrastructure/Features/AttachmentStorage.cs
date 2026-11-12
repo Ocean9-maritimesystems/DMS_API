@@ -71,6 +71,13 @@ public sealed class AttachmentStorage
     private readonly ILogger<AttachmentStorage> _logger;
     private readonly Dictionary<string, BlobTableSetting> _settings = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Files this request wrote to a local folder or the cloud that were not there before, until the database save
+    /// that refers to them succeeds (see SaveOrDiscardAsync). A file that replaced one of the same name is not listed:
+    /// removing it would remove what the existing row points to.
+    /// </summary>
+    private readonly List<(string Table, AttachmentRef File)> _unsaved = new();
+
     public AttachmentStorage(GeneralContext db, ILogger<AttachmentStorage> logger)
     {
         _db = db;
@@ -134,14 +141,18 @@ public sealed class AttachmentStorage
             {
                 var path = LocalPath(s.HQ_Local_Folder, table, blobId, fileName);
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                var isNew = !File.Exists(path);
                 await File.WriteAllBytesAsync(path, bytes, ct);
+                if (isNew) _unsaved.Add((table, new AttachmentRef(blobId, fileName, null, Local, s.HQ_Local_Folder, null, null)));
                 break;
             }
             case Cloud:
             {
                 var container = await ContainerAsync(s, s.Cloud_ContainerName, create: true, ct);
-                await container.GetBlobClient(CloudName(s.Cloud_Directory, table, blobId, fileName))
-                    .UploadAsync(BinaryData.FromBytes(bytes), overwrite: true, ct);
+                var blob = container.GetBlobClient(CloudName(s.Cloud_Directory, table, blobId, fileName));
+                var isNew = !(await blob.ExistsAsync(ct)).Value;
+                await blob.UploadAsync(BinaryData.FromBytes(bytes), overwrite: true, ct);
+                if (isNew) _unsaved.Add((table, new AttachmentRef(blobId, fileName, null, Cloud, null, s.Cloud_ContainerName, s.Cloud_Directory)));
                 break;
             }
             default:
@@ -149,6 +160,27 @@ public sealed class AttachmentStorage
                 break;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Runs the database save that refers to the files saved so far. If it fails, those files (new ones in a local folder
+    /// or the cloud) are removed again, so a failed save leaves no file behind that no row points to; then the error goes on.
+    /// </summary>
+    public async Task<T> SaveOrDiscardAsync<T>(Func<Task<T>> save)
+    {
+        try
+        {
+            var result = await save();
+            _unsaved.Clear();
+            return result;
+        }
+        catch
+        {
+            foreach (var (table, file) in _unsaved)
+                await DeleteAsync(table, file); // best effort, failures logged
+            _unsaved.Clear();
+            throw;
+        }
     }
 
     /// <summary>The file of a blob row: BlobContents when it is in the database, else from the local folder or the cloud.</summary>

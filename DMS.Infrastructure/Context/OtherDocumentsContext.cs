@@ -24,19 +24,19 @@ public partial class OtherDocumentsContext : DbContext
 
     public virtual DbSet<OtherDocument_Log> OtherDocument_Log { get; set; } = null!;
 
-    public virtual DbSet<OtherDocument_UserFavourite> OtherDocument_UserFavourite { get; set; }
+    public virtual DbSet<OtherDocument_UserFavourite> OtherDocument_UserFavourite { get; set; } = null!;
 
-    public virtual DbSet<OtherDocument_Settings> OtherDocument_Settings { get; set; }
+    public virtual DbSet<OtherDocument_Settings> OtherDocument_Settings { get; set; } = null!;
 
-    public virtual DbSet<OtherDocument_Notification> OtherDocument_Notification { get; set; }
+    public virtual DbSet<OtherDocument_Notification> OtherDocument_Notification { get; set; } = null!;
 
     public virtual DbSet<Vw_OtherDocument_MasterBlob> Vw_OtherDocument { get; set; } = null!;
 
-    public virtual DbSet<VwOtherDocumentNotification> VwOtherDocumentNotification { get; set; }
+    public virtual DbSet<VwOtherDocumentNotification> VwOtherDocumentNotification { get; set; } = null!;
 
-    public virtual DbSet<OtherDocumentList> OtherDocumentList { get; set; }
+    public virtual DbSet<OtherDocumentList> OtherDocumentList { get; set; } = null!;
 
-    public virtual DbSet<OtherDocumentChart> OtherDocumentChart { get; set; }
+    public virtual DbSet<OtherDocumentChart> OtherDocumentChart { get; set; } = null!;
 
     public virtual DbSet<OtherDocumentRecentList> OtherDocumentRecentList { get; set; } = null!;
 

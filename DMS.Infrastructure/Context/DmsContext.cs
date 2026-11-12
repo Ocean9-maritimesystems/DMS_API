@@ -32,39 +32,39 @@ public partial class DmsContext : DbContext
 
     public virtual DbSet<ManualUserAckList> UserAckLists { get; set; } = null!;
 
-    public virtual DbSet<DmApprovalAndMailSetup> DmApprovalAndMailSetups { get; set; }
+    public virtual DbSet<DmApprovalAndMailSetup> DmApprovalAndMailSetups { get; set; } = null!;
 
-    public virtual DbSet<DmCategory> DmCategories { get; set; }
+    public virtual DbSet<DmCategory> DmCategories { get; set; } = null!;
 
-    public virtual DbSet<DmManual> DmManuals { get; set; }
+    public virtual DbSet<DmManual> DmManuals { get; set; } = null!;
     
-    public virtual DbSet<DmManualVersion> DmManualVersions { get; set; }
+    public virtual DbSet<DmManualVersion> DmManualVersions { get; set; } = null!;
 
-    public virtual DbSet<DmManualApprovalSetting> DmManualApprovalSettings { get; set; }
+    public virtual DbSet<DmManualApprovalSetting> DmManualApprovalSettings { get; set; } = null!;
 
-    public virtual DbSet<DmManualApprovedList> DmManualApprovedLists { get; set; }
+    public virtual DbSet<DmManualApprovedList> DmManualApprovedLists { get; set; } = null!;
 
-    public virtual DbSet<DmManualAttachment> DmManualAttachments { get; set; }
+    public virtual DbSet<DmManualAttachment> DmManualAttachments { get; set; } = null!;
 
-    public virtual DbSet<DmManualLog> DmManualLogs { get; set; }
+    public virtual DbSet<DmManualLog> DmManualLogs { get; set; } = null!;
 
-    public virtual DbSet<DmManualToAckHq> DmManualToAckHqs { get; set; }
+    public virtual DbSet<DmManualToAckHq> DmManualToAckHqs { get; set; } = null!;
 
-    public virtual DbSet<DmManualToAckVsl> DmManualToAckVsls { get; set; }
+    public virtual DbSet<DmManualToAckVsl> DmManualToAckVsls { get; set; } = null!;
 
-    public virtual DbSet<DmManualUserAck> DmManualUserAcks { get; set; }
+    public virtual DbSet<DmManualUserAck> DmManualUserAcks { get; set; } = null!;
 
-    public virtual DbSet<DmManualUserFavourite> DmManualUserFavourites { get; set; }
+    public virtual DbSet<DmManualUserFavourite> DmManualUserFavourites { get; set; } = null!;
 
-    public virtual DbSet<DM_ManualNotification> DM_ManualNotification { get; set; }
+    public virtual DbSet<DM_ManualNotification> DM_ManualNotification { get; set; } = null!;
 
-    public virtual DbSet<DmSettings> DmSettings { get; set; }
+    public virtual DbSet<DmSettings> DmSettings { get; set; } = null!;
 
-    public virtual DbSet<DmStatus> DmStatuses { get; set; }
+    public virtual DbSet<DmStatus> DmStatuses { get; set; } = null!;
 
-    public virtual DbSet<VwDmManualVersion> VwDmManualVersions { get; set; }
+    public virtual DbSet<VwDmManualVersion> VwDmManualVersions { get; set; } = null!;
 
-    public virtual DbSet<VwManualNotification> VwManualNotification { get; set; }
+    public virtual DbSet<VwManualNotification> VwManualNotification { get; set; } = null!;
 
     /// <summary>Which notifications each office user has read (Notification_Read; Features/NotificationReads).</summary>
     public virtual DbSet<NotificationRead> Notification_Read { get; set; } = null!;

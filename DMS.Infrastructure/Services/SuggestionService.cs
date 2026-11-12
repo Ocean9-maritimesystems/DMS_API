@@ -170,6 +170,7 @@ public sealed class SuggestionService : ISuggestionService
         var maxBytes = await MaxFileBytesAsync();
         if (request.Files.Any(f => f.Bytes.Length > maxBytes))
             throw new ArgumentException($"Each file must be {maxBytes / 1024 / 1024} MB or smaller.");
+        foreach (var f in request.Files) FileRules.Check(f.FileName);
 
         var id = await _db.NextIdAsync("SUG_Master", vesselId: SqlDb.OfficeOnly);
         var logId = await _db.NextIdAsync("SUG_Log", vesselId: SqlDb.OfficeOnly);

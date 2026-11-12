@@ -14,17 +14,17 @@ public partial class GeneralContext : DbContext
         _dbActions = dbActions;
     }
 
-    public virtual DbSet<GenErrorHqLog> GenErrorHqLogs { get; set; }
+    public virtual DbSet<GenErrorHqLog> GenErrorHqLogs { get; set; } = null!;
 
-    public virtual DbSet<GenErrorVslLog> GenErrorVslLogs { get; set; }
+    public virtual DbSet<GenErrorVslLog> GenErrorVslLogs { get; set; } = null!;
 
-    public virtual DbSet<HqUser> HqUsers { get; set; }
+    public virtual DbSet<HqUser> HqUsers { get; set; } = null!;
 
-    public virtual DbSet<HqUserRole> HqUserRoles { get; set; }
+    public virtual DbSet<HqUserRole> HqUserRoles { get; set; } = null!;
 
-    public virtual DbSet<VVessel> VVessels { get; set; }
+    public virtual DbSet<VVessel> VVessels { get; set; } = null!;
 
-    public virtual DbSet<VslStaff> VslStaffs { get; set; }
+    public virtual DbSet<VslStaff> VslStaffs { get; set; } = null!;
 
     public virtual DbSet<SugMaster> SugMasters { get; set; } = null!;
 

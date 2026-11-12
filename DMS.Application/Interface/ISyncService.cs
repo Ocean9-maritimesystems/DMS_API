@@ -14,20 +14,12 @@ public interface ISyncService
     /// <summary>Checks the X-Vessel-Key sent by a vessel against Sync_VesselKey.</summary>
     Task<bool> ValidateVesselKeyAsync(int vesselId, string key);
 
-    /// <summary>Stores acknowledgements made on board. Safe to repeat: an acknowledgement already stored is skipped.</summary>
-    Task<SyncPushResult> PushAsync(SyncPushRequest request);
-
     /// <summary>
-    /// Stores one other document added on board, with its files (in the order of doc.Files). Safe to repeat: a
-    /// document this vessel already sent (same type and number) is returned as it is, not stored again.
+    /// Stores everything a vessel sent (api/Sync/Upload): acknowledgements, documents and their files, folders, the
+    /// document log, suggestions, read marks. <paramref name="files"/>: the file parts by name (SyncUploadRow.FileRef).
+    /// Safe to repeat. Each record gets its own result, so one the office refuses never holds up the rest.
     /// </summary>
-    Task<OtherDocumentPushResult> PushOtherDocumentAsync(int vesselId, OtherDocumentPushDto doc, IReadOnlyList<byte[]> files);
-
-    /// <summary>
-    /// Stores records made on board in the new feature tables (inbox read marks, suggestions, folders, files), under
-    /// the same keys. Safe to repeat. Each row gets its own result, so one bad row never holds up the rest.
-    /// </summary>
-    Task<SyncPushRowsResult> PushRowsAsync(int vesselId, SyncPushRowsRequest request);
+    Task<SyncUploadResult> UploadAsync(int vesselId, SyncUploadRequest request, IReadOnlyDictionary<string, byte[]> files);
 
     /// <summary>The contents of a SUG_Blob row for this vessel (or all vessels); null when not its file.</summary>
     Task<(byte[] Bytes, string? FileName)?> GetFeatureFileAsync(int vesselId, string table, long blobId);

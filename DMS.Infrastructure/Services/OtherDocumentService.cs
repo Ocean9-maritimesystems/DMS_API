@@ -437,6 +437,8 @@ public class OtherDocumentService : IOtherDocumentService
         var maxBytes = await MaxFileBytesAsync();
         var files = request.Files.Where(f => f.Bytes.Length > 0).ToList();
         if (files.Any(f => f.Bytes.Length > maxBytes)) return (null, $"Files must be {maxBytes / 1024 / 1024} MB or smaller.");
+        var blocked = files.Select(f => FileRules.Problem(f.FileName)).FirstOrDefault(p => p != null);
+        if (blocked != null) return (null, blocked);
 
         var id = await _db.NextIdAsync("OtherDocumentMaster");
         var logId = await _db.NextIdAsync("OtherDocument_Log");

@@ -62,10 +62,18 @@ public class DmsInboxRead
     public DateTime ReadOn { get; set; }
 }
 
+/// <summary>dbo.Notification_Read: one row per user and notification read. Written with plain SQL (NotificationReads).</summary>
 [Table("Notification_Read")]
-[PrimaryKey(nameof(Module), nameof(UserID), nameof(NotificationID))]
 public class NotificationRead
 {
+    [Key, DatabaseGenerated(DatabaseGeneratedOption.None)]
+    public long Notification_ReadID { get; set; }
+
+    [StringLength(3), Unicode(false)]
+    public string Origin { get; set; } = "HQ";
+
+    public int VesselID { get; set; } = -1;
+
     [StringLength(3), Unicode(false)] 
     public string Module { get; set; } = "";
 

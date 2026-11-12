@@ -1,5 +1,5 @@
+using DMS.Data.EF;
 using DMS.Data.EF.Models.Features;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace DMS.Data.EF.Features;
@@ -28,34 +28,37 @@ public static class NotificationReads
     }
 
     /// <summary>The notification IDs of one module this user has read (notifications are listed for 30 days).</summary>
+    /// <remarks>
+    /// Plain SQL, so it works from any context (the manuals and circulars services pass their own, which do not map
+    /// Notification_Read).
+    /// </remarks>
     public static async Task<HashSet<long>> ReadIdsAsync(DbContext db, string module, string userId)
     {
         var since = DateTime.UtcNow.AddDays(-35);
-        var ids = await db.Set<NotificationRead>().AsNoTracking()
-            .Where(r => r.Module == module && r.UserID == userId && r.ReadOn >= since)
-            .Select(r => r.NotificationID)
+        var ids = await db.Database
+            .SqlQuery<long>($"SELECT NotificationID AS [Value] FROM dbo.Notification_Read WHERE Module = {module} AND UserID = {userId} AND ReadOn >= {since}")
             .ToListAsync();
         return ids.ToHashSet();
     }
 
+    /// <summary>
+    /// Records that this user has read one notification (once). The row gets its key from Proc_NextID (an office
+    /// row: Origin HQ, VesselID -1), like every other table.
+    /// </summary>
     public static async Task MarkReadAsync(DbContext db, string module, long notificationId, string userId)
     {
-        var reads = db.Set<NotificationRead>();
-        if (await reads.AnyAsync(r => r.Module == module && r.NotificationID == notificationId && r.UserID == userId))
-            return;
-        var row = reads.Add(new NotificationRead { Module = module, NotificationID = notificationId, UserID = userId, ReadOn = DateTime.UtcNow });
-        try
-        {
-            await db.SaveChangesAsync();
-        }
-        catch (DbUpdateException ex) when (ex.InnerException is SqlException { Number: 2627 or 2601 })
-        {
-            // Marked read by a second click at the same moment: already done.
-        }
-        finally
-        {
-            row.State = EntityState.Detached;
-        }
+        var already = await db.Database
+            .SqlQuery<int>($"SELECT COUNT(*) AS [Value] FROM dbo.Notification_Read WHERE Module = {module} AND NotificationID = {notificationId} AND UserID = {userId}")
+            .ToListAsync();
+        if (already.FirstOrDefault() > 0) return;
+
+        var id = await db.NextIdAsync("Notification_Read");
+        // A second click at the same moment finds the row there and adds nothing.
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            IF NOT EXISTS (SELECT 1 FROM dbo.Notification_Read WHERE Module = {module} AND NotificationID = {notificationId} AND UserID = {userId})
+                INSERT dbo.Notification_Read (Notification_ReadID, Origin, VesselID, Module, NotificationID, UserID, ReadOn)
+                VALUES ({id}, 'HQ', -1, {module}, {notificationId}, {userId}, SYSUTCDATETIME());
+            """);
     }
 }
 

@@ -50,70 +50,45 @@ public class SyncController : ControllerBase
         return Ok(await _service.ConfirmChangesAsync(VesselId, request.ChangeIds));
     }
 
-    /// <summary>POST api/Sync/Push: acknowledgements made on board.</summary>
-    [HttpPost("Push")]
-    public async Task<ActionResult<SyncPushResult>> Push([FromBody] SyncPushRequest request)
-    {
-        request.VesselID = VesselId;
-        var result = await _service.PushAsync(request);
-        _logger.LogInformation(
-            "Sync push from vessel {VesselId}: {Manual} manual and {Circular} circular acknowledgement(s) stored",
-            VesselId, result.ManualAcksAccepted, result.CircularAcksAccepted);
-        return Ok(result);
-    }
-
-    /// <summary>Largest upload of one document from a vessel (all its files together).</summary>
-    private const long MaxOtherDocumentUploadBytes = 300L * 1024 * 1024;
+    /// <summary>Largest upload from a vessel in one call (records with their files).</summary>
+    private const long MaxUploadBytes = 300L * 1024 * 1024;
 
     /// <summary>
-    /// POST api/Sync/OtherDocument: one other document added on board, with its files (multipart/form-data:
-    /// a "document" part with OtherDocumentPushDto as JSON, then the "files" parts in the same order).
-    /// The form is read here, after the vessel key check, so a refused call never uploads its files.
+    /// POST api/Sync/Upload: everything made or changed on board (multipart/form-data: an "upload" part with
+    /// SyncUploadRequest as JSON, then one "file" part per file, named by SyncUploadRow.FileRef). The form is read
+    /// here, after the vessel key check, so a refused call never uploads its files.
     /// </summary>
-    [HttpPost("OtherDocument")]
-    [RequestSizeLimit(MaxOtherDocumentUploadBytes)]
-    [RequestFormLimits(MultipartBodyLengthLimit = MaxOtherDocumentUploadBytes)]
-    public async Task<ActionResult<OtherDocumentPushResult>> PushOtherDocument(CancellationToken ct)
+    [HttpPost("Upload")]
+    [RequestSizeLimit(MaxUploadBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = MaxUploadBytes)]
+    public async Task<ActionResult<SyncUploadResult>> Upload(CancellationToken ct)
     {
         if (!Request.HasFormContentType) return BadRequest("Expected multipart/form-data.");
         var form = await Request.ReadFormAsync(ct);
 
-        OtherDocumentPushDto? doc;
+        SyncUploadRequest? request;
         try
         {
-            doc = System.Text.Json.JsonSerializer.Deserialize<OtherDocumentPushDto>(form["document"].ToString(),
+            request = System.Text.Json.JsonSerializer.Deserialize<SyncUploadRequest>(form["upload"].ToString(),
                 new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         }
         catch (System.Text.Json.JsonException)
         {
-            doc = null;
+            request = null;
         }
-        if (doc == null) return BadRequest("The \"document\" part is missing or not valid JSON.");
+        if (request == null) return BadRequest("The \"upload\" part is missing or not valid JSON.");
 
-        var files = new List<byte[]>();
-        foreach (var f in form.Files.GetFiles("files"))
+        var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var f in form.Files.GetFiles("file"))
         {
             using var ms = new MemoryStream((int)f.Length);
             await f.CopyToAsync(ms, ct);
-            files.Add(ms.ToArray());
+            files[f.FileName] = ms.ToArray();
         }
 
-        var result = await _service.PushOtherDocumentAsync(VesselId, doc, files);
-        _logger.LogInformation(
-            "Sync push from vessel {VesselId}: other document {Number} ({Files} file(s)) {Outcome}",
-            VesselId, doc.DocumentNumber, files.Count,
-            result.Error ?? (result.AlreadyApplied ? "already stored" : $"stored as {result.Document?.OtherDocumentMasterID}"));
-        return Ok(result);
-    }
-
-    /// <summary>POST api/Sync/PushRows: records made on board in the new feature tables, same keys (see SyncPushRowsRequest).</summary>
-    [HttpPost("PushRows")]
-    [RequestSizeLimit(MaxOtherDocumentUploadBytes)]
-    public async Task<ActionResult<SyncPushRowsResult>> PushRows([FromBody] SyncPushRowsRequest request)
-    {
-        var result = await _service.PushRowsAsync(VesselId, request);
-        _logger.LogInformation("Sync push rows from vessel {VesselId}: {Stored} of {Count} stored",
-            VesselId, result.Results.Count(r => r.Stored), result.Results.Count);
+        var result = await _service.UploadAsync(VesselId, request, files);
+        _logger.LogInformation("Sync upload from vessel {VesselId}: {Stored} of {Count} record(s) stored, {Files} file(s)",
+            VesselId, result.Results.Count(r => r.Stored), result.Results.Count, files.Count);
         return Ok(result);
     }
 

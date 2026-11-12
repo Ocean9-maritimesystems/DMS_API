@@ -356,44 +356,30 @@ public class CIRService : ICIRService
 
     public async Task<long> InsertCIR_MasterRecord(string circularType)
     {
-        try
-        {
-            var cir_Master = new CIR_Master();
-            cir_Master.CIR_MasterID = await _dbContext.NextIdAsync<CIR_Master>();
-            cir_Master.Origin = "HQ";
-            cir_Master.VesselID = -1;
-            cir_Master.Status = "Temp";
-            cir_Master.CIR_Number = "Temp";
-            cir_Master.CIR_CategoryID = -1;
-            cir_Master.CircularType = circularType;
-            _dbContext.CIR_Master.Add(cir_Master);
-            await _dbContext.SaveChangesAsync();
+        var cir_Master = new CIR_Master();
+        cir_Master.CIR_MasterID = await _dbContext.NextIdAsync<CIR_Master>();
+        cir_Master.Origin = "HQ";
+        cir_Master.VesselID = -1;
+        cir_Master.Status = "Temp";
+        cir_Master.CIR_Number = "Temp";
+        cir_Master.CIR_CategoryID = -1;
+        cir_Master.CircularType = circularType;
+        _dbContext.CIR_Master.Add(cir_Master);
+        await _dbContext.SaveChangesAsync();
 
-            return cir_Master.CIR_MasterID;
-        }
-        catch (Exception)
-        {
-            throw;
-        }
+        return cir_Master.CIR_MasterID;
     }
 
     public async Task RemoveTempCIRAsync(long cir_MasterID)
     {
-        try
+        var cir_Master = await _dbContext.CIR_Master
+                              .Where(m => m.CIR_MasterID == cir_MasterID)
+                              .OrderByDescending(m => m.CIR_MasterID)
+                              .FirstOrDefaultAsync();
+        if (cir_Master != null)
         {
-            var cir_Master = await _dbContext.CIR_Master
-                                  .Where(m => m.CIR_MasterID == cir_MasterID)
-                                  .OrderByDescending(m => m.CIR_MasterID)
-                                  .FirstOrDefaultAsync();
-            if (cir_Master != null)
-            {
-                _dbContext.CIR_Master.Remove(cir_Master);
-                await _dbContext.SaveChangesAsync();
-            }
-        }
-        catch (Exception)
-        { 
-            throw;
+            _dbContext.CIR_Master.Remove(cir_Master);
+            await _dbContext.SaveChangesAsync();
         }
     }
 
@@ -410,29 +396,22 @@ public class CIRService : ICIRService
 
     public async Task AddToFavouriteAsync(long cir_MasterID, string circularType, string userID)
     {
-        try
+        if (!_dbContext.CIR_UserFavourite.Any(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID))
         {
-            if (!_dbContext.CIR_UserFavourite.Any(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID))
-            {
-                var nextCIR_UserFavouriteID = await _dbContext.NextIdAsync<CIR_UserFavourite>();
+            var nextCIR_UserFavouriteID = await _dbContext.NextIdAsync<CIR_UserFavourite>();
 
-                var userFavourite = new CIR_UserFavourite();
-                userFavourite.CIR_UserFavouriteID = nextCIR_UserFavouriteID;
-                userFavourite.Origin = "HQ";
-                userFavourite.VesselID = -1;
-                userFavourite.CIR_MasterID = cir_MasterID;
-                userFavourite.UserId = userID;
-                userFavourite.IsDisabled = 0;
-                await _dbContext.CIR_UserFavourite.AddAsync(userFavourite);
+            var userFavourite = new CIR_UserFavourite();
+            userFavourite.CIR_UserFavouriteID = nextCIR_UserFavouriteID;
+            userFavourite.Origin = "HQ";
+            userFavourite.VesselID = -1;
+            userFavourite.CIR_MasterID = cir_MasterID;
+            userFavourite.UserId = userID;
+            userFavourite.IsDisabled = 0;
+            await _dbContext.CIR_UserFavourite.AddAsync(userFavourite);
 
-                await _dbContext.SaveChangesAsync();
+            await _dbContext.SaveChangesAsync();
 
-                await _queries.AddNotification(cir_MasterID, "", ManualNotificationType.FAVOURITE, circularType + " added as Favourite for user - " + userID, "");
-            }
-        }
-        catch (Exception)
-        {
-            throw;
+            await _queries.AddNotification(cir_MasterID, "", ManualNotificationType.FAVOURITE, circularType + " added as Favourite for user - " + userID, "");
         }
     }
 

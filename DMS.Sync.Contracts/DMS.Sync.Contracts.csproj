@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The wire contract between the office API (api/Sync/...) and every vessel's DMS.Vessel.Api: one copy, used by
+       both (DMS.Application here; DMS.Vessel.Infrastructure by a project reference to this folder). No packages. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DMS.Sync.Contracts</RootNamespace>
+  </PropertyGroup>
+
+</Project>

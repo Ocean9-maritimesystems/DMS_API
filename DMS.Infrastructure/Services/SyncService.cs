@@ -18,8 +18,7 @@ namespace DMS.Application;
 /// <summary>
 /// Office side of the vessel sync (api/Sync/...), checked with the vessel key (Sync_VesselKey):
 ///   Changes / ChangesConfirm   office -> vessel: the records waiting in Sync_ChangeLog, each as it is now
-///   Push                       vessel -> office: acknowledgements made on board
-///   OtherDocument / PushRows   vessel -> office: documents and other records changed on board (Ship_ChangeLog)
+///   Upload                     vessel -> office: everything made or changed on board (SyncService.PushRows.cs)
 ///   Heartbeat                  the vessel's link state and progress (Sync_Vessel)
 ///   ...Attachment / ...File    file contents, downloaded by the vessel during its sync
 /// Every call is recorded in Sync_Log.
@@ -150,6 +149,12 @@ public partial class SyncService : ISyncService
             var hasMore = waiting.Count > max;
             if (hasMore) waiting.RemoveAt(waiting.Count - 1);
 
+            // Marked as sent BEFORE the records are read. Sync_LogChanges adds no new entry for a record while an unsent
+            // one is waiting, so a record edited between reading it and marking it was never sent again: the vessel kept
+            // the older version. Marked first, an edit from now on gets its own entry and goes with the next sync.
+            // (Sent but not confirmed stays waiting - DownloadedUtc is still empty - so nothing is lost if this call fails.)
+            await MarkChangesAsync(vesselId, waiting.Select(w => w.Id).ToList(), "SentUtc");
+
             // One change per record, whatever happened to it in between: the ship gets it as it is now.
             var changes = new List<SyncRowChange>();
             foreach (var group in waiting.GroupBy(w => w.Table, StringComparer.OrdinalIgnoreCase))
@@ -191,8 +196,21 @@ public partial class SyncService : ISyncService
                 .ThenBy(c => c.Key)
                 .ToList();
 
+            // Also capped by size, not only by count: 500 manual versions with their text can be tens of MB, more than a
+            // satellite link moves within one call. What is left out stays waiting (not confirmed) and comes next.
+            var size = 0L;
+            for (var i = 0; i < changes.Count; i++)
+            {
+                size += EstimatedSize(changes[i]);
+                if (i > 0 && size > MaxChangesBytes)
+                {
+                    changes.RemoveRange(i, changes.Count - i);
+                    hasMore = true;
+                    break;
+                }
+            }
+
             var now = DateTime.UtcNow;
-            await MarkChangesAsync(vesselId, waiting.Select(w => w.Id).ToList(), "SentUtc");
             await RecordCallAsync(vesselId, "Down", started, changes.Count, null);
             return new SyncChangesResponse { ServerTimeUtc = now, HasMore = hasMore, Changes = changes };
         }
@@ -201,6 +219,25 @@ public partial class SyncService : ISyncService
             await TryRecordCallAsync(vesselId, "Down", started, ex.Message);
             throw;
         }
+    }
+
+    /// <summary>Roughly the most JSON one api/Sync/Changes answer carries (before compression).</summary>
+    private const long MaxChangesBytes = 4 * 1024 * 1024;
+
+    /// <summary>About how many bytes a change takes in the JSON answer (text by its length, numbers and dates small).</summary>
+    private static long EstimatedSize(SyncRowChange change)
+    {
+        long size = 100 + change.TableName.Length;
+        if (change.Row == null) return size;
+        foreach (var (column, value) in change.Row)
+            size += column.Length + 6 + value switch
+            {
+                null => 4,
+                string s => s.Length + 2,
+                byte[] b => b.Length * 4 / 3 + 2,
+                _ => 24,
+            };
+        return size;
     }
 
     public async Task<SyncChangesConfirmResult> ConfirmChangesAsync(int vesselId, IReadOnlyCollection<long> changeIds)
@@ -314,381 +351,6 @@ public partial class SyncService : ISyncService
         var recordVessel = Convert.ToInt64(value);
         // -1 (and the old 0) = every vessel; -2 = office only (Database/012_NewFeatures.sql), never sent.
         return recordVessel is -1 or 0 || recordVessel == vesselId;
-    }
-
-    // =========================================================================================
-    // Push (acknowledgements made on board)
-    // =========================================================================================
-
-    public async Task<SyncPushResult> PushAsync(SyncPushRequest request)
-    {
-        var started = DateTime.UtcNow;
-        try
-        {
-            var result = await ApplyPushAsync(request);
-            await RecordCallAsync(request.VesselID, "Up", started, result.ManualAcksAccepted + result.CircularAcksAccepted, null);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            await TryRecordCallAsync(request.VesselID, "Up", started, ex.Message);
-            throw;
-        }
-    }
-
-    private async Task<SyncPushResult> ApplyPushAsync(SyncPushRequest request)
-    {
-        var result = new SyncPushResult();
-        var vesselId = request.VesselID;
-
-        // ---- Manuals ----
-        if (request.ManualAcks.Count > 0)
-        {
-            var versionIds = request.ManualAcks.Select(a => a.DM_ManualVersionID).Distinct().ToList();
-            var versions = await _dms.DmManualVersions.AsNoTracking()
-                .Where(v => versionIds.Contains(v.DM_ManualVersionID))
-                .Select(v => new { v.DM_ManualVersionID, v.DM_ManualID, v.Version })
-                .ToDictionaryAsync(v => v.DM_ManualVersionID);
-            var existing = (await _dms.DmManualUserAcks.AsNoTracking()
-                    .Where(a => a.VesselID == vesselId && versionIds.Contains(a.DM_ManualVersionID))
-                    .Select(a => new { a.DM_ManualVersionID, a.UserId })
-                    .ToListAsync())
-                .Select(a => (a.DM_ManualVersionID, a.UserId.Trim().ToUpperInvariant()))
-                .ToHashSet();
-
-            foreach (var ack in request.ManualAcks)
-            {
-                if (string.IsNullOrWhiteSpace(ack.UserId)) continue;
-                if (!versions.TryGetValue(ack.DM_ManualVersionID, out var version))
-                {
-                    result.Warnings.Add($"Manual acknowledgement for unknown version {ack.DM_ManualVersionID} was skipped.");
-                    result.SkippedManualAcks.Add($"{ack.DM_ManualVersionID}:{ack.UserId}");
-                    continue;
-                }
-                if (!existing.Add((ack.DM_ManualVersionID, ack.UserId.Trim().ToUpperInvariant())))
-                {
-                    result.ManualAcksAlreadyApplied++;
-                    continue;
-                }
-
-                // The ID given on board (Proc_NextID, this vessel's range) when free here, else a new one in that range.
-                _dms.DmManualUserAcks.Add(new DmManualUserAck
-                {
-                    DmManualUserAckId = await _dms.KeepOrNextIdAsync<DmManualUserAck>(ack.DM_Manual_UserAckID, TableIdExtensions.OriginVessel, vesselId),
-                    Origin = "VSL",
-                    VesselID = vesselId,
-                    DM_ManualID = version.DM_ManualID,
-                    DM_ManualVersionID = ack.DM_ManualVersionID,
-                    Version = LeadingNumber(version.Version) ?? ack.Version,
-                    UserId = ack.UserId.Trim(),
-                    UserRank = ack.UserRank,
-                    UserName = ack.UserName,
-                    DateRead = ToUtc(ack.DateRead),
-                    Comments = Truncate(ack.Comments, 500),
-                    IsActive = 1,
-                });
-                result.ManualAcksAccepted++;
-            }
-            await _dms.SaveChangesAsync();
-        }
-
-        // ---- Circulars ----
-        if (request.CircularAcks.Count > 0)
-        {
-            var crew = (await _general.VslStaffs.AsNoTracking()
-                    .Where(s => s.VesselID == vesselId)
-                    .Select(s => new { s.UserId, s.VslStaffId })
-                    .ToListAsync())
-                .GroupBy(s => s.UserId.Trim(), StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First().VslStaffId, StringComparer.OrdinalIgnoreCase);
-
-            var circularIds = request.CircularAcks.Select(a => a.CIR_MasterID).Distinct().ToList();
-            var knownCirculars = (await _cir.CIR_Master.AsNoTracking()
-                .Where(c => circularIds.Contains(c.CIR_MasterID))
-                .Select(c => c.CIR_MasterID)
-                .ToListAsync()).ToHashSet();
-            var existing = (await _cir.CIR_UserAck.AsNoTracking()
-                    .Where(a => a.VesselID == vesselId && a.CIR_MasterID != null && circularIds.Contains(a.CIR_MasterID.Value))
-                    .Select(a => new { a.CIR_MasterID, a.Fleet_CrewID })
-                    .ToListAsync())
-                .Select(a => (a.CIR_MasterID!.Value, a.Fleet_CrewID ?? 0))
-                .ToHashSet();
-
-            foreach (var ack in request.CircularAcks)
-            {
-                if (!crew.TryGetValue((ack.UserId ?? "").Trim(), out var crewId))
-                {
-                    result.Warnings.Add($"Circular acknowledgement by unknown crew member '{ack.UserId}' was skipped.");
-                    result.SkippedCircularAcks.Add($"{ack.CIR_MasterID}:{ack.UserId}");
-                    continue;
-                }
-                if (!knownCirculars.Contains(ack.CIR_MasterID))
-                {
-                    result.Warnings.Add($"Acknowledgement for unknown circular {ack.CIR_MasterID} was skipped.");
-                    result.SkippedCircularAcks.Add($"{ack.CIR_MasterID}:{ack.UserId}");
-                    continue;
-                }
-                if (!existing.Add((ack.CIR_MasterID, crewId)))
-                {
-                    result.CircularAcksAlreadyApplied++;
-                    continue;
-                }
-
-                _cir.CIR_UserAck.Add(new CIR_UserAck
-                {
-                    CIR_UserAckID = await _cir.KeepOrNextIdAsync<CIR_UserAck>(ack.CIR_UserAckID, TableIdExtensions.OriginVessel, vesselId),
-                    Origin = "VSL",
-                    VesselID = vesselId,
-                    CIR_MasterID = ack.CIR_MasterID,
-                    Fleet_CrewID = crewId,
-                    DateRead = ToUtc(ack.DateRead),
-                    Comments = Truncate(ack.Comments, 500),
-                    IsActive = 1,
-                });
-                result.CircularAcksAccepted++;
-            }
-            await _cir.SaveChangesAsync();
-        }
-
-        // The office rows for what was sent (new or already stored), so the vessel can replace its own
-        // pending rows (negative IDs) with them.
-        if (request.ManualAcks.Count > 0)
-        {
-            var versionIds = request.ManualAcks.Select(a => a.DM_ManualVersionID).Distinct().ToList();
-            var users = request.ManualAcks.Select(a => (a.UserId ?? "").Trim().ToUpperInvariant()).ToHashSet();
-            result.ManualAckRows = (await _dms.DmManualUserAcks.AsNoTracking()
-                    .Where(a => a.VesselID == vesselId && versionIds.Contains(a.DM_ManualVersionID))
-                    .Select(a => new SyncDMManualUserAckRow
-                    {
-                        DM_Manual_UserAckID = a.DmManualUserAckId,
-                        Origin = a.Origin,
-                        VesselID = a.VesselID,
-                        DM_ManualID = a.DM_ManualID,
-                        DM_ManualVersionID = a.DM_ManualVersionID,
-                        Version = a.Version,
-                        UserRank = a.UserRank,
-                        UserName = a.UserName,
-                        UserID = a.UserId,
-                        DateRead = a.DateRead,
-                        Comments = a.Comments,
-                        IsActive = a.IsActive,
-                    })
-                    .ToListAsync())
-                .Where(r => users.Contains(r.UserID.Trim().ToUpperInvariant()))
-                .ToList();
-        }
-        if (request.CircularAcks.Count > 0)
-        {
-            var circularIds = request.CircularAcks.Select(a => a.CIR_MasterID).Distinct().ToList();
-            result.CircularAckRows = await _cir.CIR_UserAck.AsNoTracking()
-                .Where(a => a.VesselID == vesselId && a.CIR_MasterID != null && circularIds.Contains(a.CIR_MasterID.Value))
-                .Select(a => new SyncCIRUserAckRow
-                {
-                    CIR_UserAckID = a.CIR_UserAckID,
-                    Origin = a.Origin,
-                    VesselID = a.VesselID,
-                    CIR_MasterID = a.CIR_MasterID,
-                    Fleet_CrewID = a.Fleet_CrewID,
-                    DateRead = a.DateRead,
-                    Comments = a.Comments,
-                    IsActive = a.IsActive,
-                })
-                .ToListAsync();
-        }
-
-        return result;
-    }
-
-    // =========================================================================================
-    // Push (other documents added on board)
-    // =========================================================================================
-
-    public async Task<OtherDocumentPushResult> PushOtherDocumentAsync(int vesselId, OtherDocumentPushDto doc, IReadOnlyList<byte[]> files)
-    {
-        var started = DateTime.UtcNow;
-        try
-        {
-            var result = await ApplyOtherDocumentPushAsync(vesselId, doc, files);
-            await RecordCallAsync(vesselId, "Up", started, result.Stored && !result.AlreadyApplied ? 1 : 0, result.Error);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            await TryRecordCallAsync(vesselId, "Up", started, ex.Message);
-            throw;
-        }
-    }
-
-    private async Task<OtherDocumentPushResult> ApplyOtherDocumentPushAsync(int vesselId, OtherDocumentPushDto doc, IReadOnlyList<byte[]> files)
-    {
-        var number = (doc.DocumentNumber ?? "").Trim();
-        var title = (doc.DocumentTitle ?? "").Trim();
-        if (number.Length == 0 || title.Length == 0)
-            return new OtherDocumentPushResult { Error = "The document has no number or title." };
-        if (doc.Files.Count != files.Count)
-            return new OtherDocumentPushResult { Error = $"{doc.Files.Count} file(s) described but {files.Count} sent." };
-        if (!await _other.OtherDocument_Type.AsNoTracking().AnyAsync(t => t.OtherDocument_TypeID == doc.OtherDocument_TypeID))
-            return new OtherDocumentPushResult { Error = $"Document type {doc.OtherDocument_TypeID} is not known at the office." };
-
-        // Sent before (the answer was lost on the way back, or the vessel sends it again because one of its files has
-        // not reached the office): keep what is held and add the files that are not here yet.
-        var held = await _other.OtherDocumentMaster.AsNoTracking()
-            .Where(m => m.VesselID == vesselId && m.Origin == "VSL" && (m.IsDeleted ?? 0) != 1
-                        && m.OtherDocument_TypeID == doc.OtherDocument_TypeID && m.DocumentNumber == number)
-            .Select(m => (long?)m.OtherDocumentMasterID)
-            .FirstOrDefaultAsync();
-        if (held != null)
-        {
-            var heldFiles = await _other.OtherDocument_Blob.AsNoTracking()
-                .Where(b => b.OtherDocumentMasterID == held.Value)
-                .Select(b => new { b.OtherDocument_BlobID, b.FileName, b.BlobSize })
-                .ToListAsync();
-            var added = 0;
-            for (var i = 0; i < files.Count; i++)
-            {
-                var f = doc.Files[i];
-                if (files[i].Length == 0) continue; // a file the vessel only knows by name (no contents on board)
-                var name = Truncate(f.FileName, 150);
-                if (heldFiles.Any(h => h.OtherDocument_BlobID == f.VesselFileID || (h.FileName == name && h.BlobSize == files[i].Length)))
-                    continue;
-                await AddPushedFileAsync(vesselId, held.Value, f, files[i]);
-                added++;
-            }
-            if (added > 0)
-            {
-                await _other.SaveChangesAsync();
-                _other.ChangeTracker.Clear();
-            }
-            return await OtherDocumentPushResultAsync(held.Value, doc, alreadyApplied: added == 0);
-        }
-
-        var uploadedOn = doc.UploadedOn.HasValue ? ToUtc(doc.UploadedOn.Value) : DateTime.UtcNow;
-        // The IDs given on board (Proc_NextID, this vessel's range) when free here, else new ones in that range.
-        var masterId = await _other.KeepOrNextIdAsync<OtherDocumentMaster>(doc.VesselDocumentID, TableIdExtensions.OriginVessel, vesselId);
-        _other.OtherDocumentMaster.Add(new OtherDocumentMaster
-        {
-            OtherDocumentMasterID = masterId,
-            Origin = "VSL",
-            VesselID = vesselId,
-            OtherDocument_TypeID = doc.OtherDocument_TypeID,
-            DocumentNumber = Truncate(number, 50)!,
-            DocumentTitle = Truncate(title, 500)!,
-            Status = Truncate(doc.Status?.Trim(), 50),
-            Reference = Truncate(doc.Reference?.Trim(), 150),
-            Comments = Truncate(doc.Comments?.Trim(), 500),
-            UploadedOn = uploadedOn,
-            UploadedBy = Truncate(doc.UploadedBy?.Trim(), 150),
-            IsDeleted = 0,
-            ModifiedBy = Truncate(doc.UploadedBy?.Trim(), 50),
-            ModifiedDate = uploadedOn,
-            OtherDocument_FolderID = doc.OtherDocument_FolderID,
-        });
-
-        for (var i = 0; i < files.Count; i++)
-            await AddPushedFileAsync(vesselId, masterId, doc.Files[i], files[i]);
-
-        // No log row here: the vessel wrote its own "Added" log when the document was added on board.
-        await _other.SaveChangesAsync(); // one transaction: the document and its files, or nothing
-        _other.ChangeTracker.Clear();     // the file bytes are not needed in memory any longer
-
-        return await OtherDocumentPushResultAsync(masterId, doc, alreadyApplied: false);
-    }
-
-    /// <summary>Adds (not yet saved) one file a vessel sent with a document, under the ID given on board when it is free here.</summary>
-    private async Task AddPushedFileAsync(int vesselId, long masterId, OtherDocumentPushFileDto f, byte[] bytes)
-    {
-        var fileId = await _other.KeepOrNextIdAsync<OtherDocument_Blob>(f.VesselFileID, TableIdExtensions.OriginVessel, vesselId);
-        var fileName = Truncate(f.FileName, 150);
-        // Kept at the office in the database, a local folder or the cloud, as BlobTableSettings says for OtherDocument_Blob.
-        var stored = await _storage.SaveAsync(AttachmentStorage.OtherDocumentTable, fileId, fileName, bytes);
-        _other.OtherDocument_Blob.Add(new OtherDocument_Blob
-        {
-            OtherDocument_BlobID = fileId,
-            OtherDocumentMasterID = masterId,
-            Origin = "VSL",
-            VesselID = vesselId,
-            Description = Truncate(f.Description ?? f.FileName, 150),
-            FileName = fileName,
-            FileType = Truncate(f.FileType, 50),
-            OriginalFileType = Truncate(f.OriginalFileType, 50),
-            BlobSize = bytes.Length,
-            BlobContents = stored.BlobContents,
-            AddedOn = f.AddedOn.HasValue ? ToUtc(f.AddedOn.Value) : DateTime.UtcNow,
-            Cloud_ContainerName = stored.Cloud_ContainerName,
-            Cloud_Directory = stored.Cloud_Directory,
-            HQ_Storage_Option = stored.HQ_Storage_Option,
-            HQ_Local_Folder = stored.HQ_Local_Folder,
-            HQ_DatabaseName = stored.HQ_DatabaseName,
-            VSL_Storage_Option = stored.VSL_Storage_Option,
-            VSL_Local_Folder = stored.VSL_Local_Folder,
-            VSL_DatabaseName = stored.VSL_DatabaseName,
-        });
-    }
-
-    /// <summary>The office rows for a document a vessel sent, read back as stored (datetime precision included).</summary>
-    private async Task<OtherDocumentPushResult> OtherDocumentPushResultAsync(long masterId, OtherDocumentPushDto doc, bool alreadyApplied)
-    {
-        var m = await _other.OtherDocumentMaster.AsNoTracking().FirstAsync(x => x.OtherDocumentMasterID == masterId);
-        var blobs = await _other.OtherDocument_Blob.AsNoTracking()
-            .Where(b => b.OtherDocumentMasterID == masterId)
-            .OrderBy(b => b.OtherDocument_BlobID)
-            .Select(b => new SyncOtherDocumentBlobRow
-            {
-                OtherDocument_BlobID = b.OtherDocument_BlobID,
-                OtherDocumentMasterID = b.OtherDocumentMasterID,
-                Origin = b.Origin,
-                VesselID = b.VesselID,
-                Description = b.Description,
-                FileName = b.FileName,
-                FileType = b.FileType,
-                OriginalFileType = b.OriginalFileType,
-                BlobSize = b.BlobSize ?? 0,
-                AddedOn = b.AddedOn,
-                Cloud_ContainerName = b.Cloud_ContainerName,
-                Cloud_Directory = b.Cloud_Directory,
-                HQ_Storage_Option = b.HQ_Storage_Option,
-                HQ_DatabaseName = b.HQ_DatabaseName,
-                HQ_Local_Folder = b.HQ_Local_Folder,
-                VSL_Storage_Option = b.VSL_Storage_Option,
-                VSL_DatabaseName = b.VSL_DatabaseName,
-                VSL_Local_Folder = b.VSL_Local_Folder,
-            })
-            .ToListAsync();
-
-        // Stored in the order sent, so file i is doc.Files[i]. On a repeat, also match by name and size.
-        var vesselIds = new List<long>();
-        var unmatched = doc.Files.ToList();
-        foreach (var b in blobs)
-        {
-            var f = unmatched.FirstOrDefault(x => x.FileName == b.FileName && x.BlobSize == b.BlobSize) ?? unmatched.FirstOrDefault();
-            if (f != null) unmatched.Remove(f);
-            vesselIds.Add(f?.VesselFileID ?? 0);
-        }
-
-        return new OtherDocumentPushResult
-        {
-            Stored = true,
-            AlreadyApplied = alreadyApplied,
-            Document = new SyncOtherDocumentMasterRow
-            {
-                OtherDocumentMasterID = m.OtherDocumentMasterID,
-                Origin = m.Origin,
-                VesselID = m.VesselID,
-                OtherDocument_TypeID = m.OtherDocument_TypeID,
-                DocumentNumber = m.DocumentNumber ?? "",
-                DocumentTitle = m.DocumentTitle,
-                Status = m.Status,
-                Reference = m.Reference,
-                Comments = m.Comments,
-                UploadedOn = m.UploadedOn,
-                UploadedBy = m.UploadedBy,
-                IsDeleted = m.IsDeleted,
-                ModifiedBy = m.ModifiedBy,
-                ModifiedDate = m.ModifiedDate,
-            },
-            Files = blobs,
-            VesselFileIDs = vesselIds,
-        };
     }
 
     // =========================================================================================

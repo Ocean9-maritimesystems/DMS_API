@@ -245,52 +245,22 @@ public class ManualService : IManualService
 
     public async Task<List<DmManualAttachment>> GetManualAttachmentListAsync(long dm_ManualID)
     {
-        var attachments = await _dbContext.DmManualAttachments
-                             .Where(a => a.DM_ManualID == dm_ManualID)
-                             .ToListAsync();
-
-        return attachments;
-    }
-
-    public async Task<List<ManualDetails>> GetDmManualsAsyncx()
-    {
-        // Pseudocode:
-        // 1. For each manual, get the latest (highest DM_ManualVersionID) version that is active and current.
-        // 2. Join DmManuals with DmManualVersion on DM_ManualID.
-        // 3. Filter for IsActive == 1, IsDisabled == 0, IsDeleted == 0.
-        // 4. For each manual, select only the version with the highest DM_ManualVersionID.
-        // 5. Project to DmManualVersion_View and return as list.
-
-        var latestVersions = _dbContext.DmManualVersions
-            .Where(v => v.IsActive == 1)
-            .GroupBy(v => v.DM_ManualID)
-            .Select(g => g.OrderByDescending(v => v.DM_ManualVersionID).First().DM_ManualVersionID);
-
-        var data = await (from manual in _dbContext.DmManuals
-                          join manualVersion in _dbContext.DmManualVersions
-                              on manual.DM_ManualID equals manualVersion.DM_ManualID
-                          where manualVersion.IsActive == 1
-                                && manual.IsDeleted == 0
-                                && latestVersions.Contains(manualVersion.DM_ManualVersionID)
-                          select new ManualDetails()
-                          {
-                              DM_ManualVersionID = manual.DM_ManualID,
-                              Version = manualVersion.Version,
-                              ManualCode = manual.ManualCode,
-                              ManualName = manual.ManualName,
-                              ManualNo = manual.ManualNo,
-                              DM_CategoryID = manual.DM_CategoryID ?? -1,
-                              DM_StatusID = manual.DmStatusId,
-                              CanExport = manual.CanExport ?? 0,
-                              IsApprovalRequired = manual.IsApprovalRequired ?? 0,
-                              IsMainTitle = manual.IsMainTitle,
-                              Approval_FlowID = manual.Approval_FlowID,
-                              TextContents = manualVersion.TextContents,
-                              Comments = manualVersion.Comments,
-                          }).ToListAsync();
-
-        // Ensure the result is not null to satisfy the non-nullable return type
-        return data ?? new List<ManualDetails>();
+        // The list without the file contents (all of a manual's images could be many MB); a file is read on its own.
+        return await _dbContext.DmManualAttachments.AsNoTracking()
+            .Where(a => a.DM_ManualID == dm_ManualID)
+            .Select(a => new DmManualAttachment
+            {
+                DmManualAttachmentsId = a.DmManualAttachmentsId,
+                Origin = a.Origin,
+                VesselID = a.VesselID,
+                DM_ManualID = a.DM_ManualID,
+                ImageRefNo = a.ImageRefNo,
+                BlobSize = a.BlobSize,
+                FileType = a.FileType,
+                AddedOn = a.AddedOn,
+                IsDeleted = a.IsDeleted,
+            })
+            .ToListAsync();
     }
 
     public async Task<ManualDetails> GetManualDetailsByVersionAsync(long dm_ManualVersionID)
@@ -570,31 +540,24 @@ public class ManualService : IManualService
 
     public async Task AddToFavouriteAsync(long dm_ManualID, string userID)
     {
-        try
+        if (!_dbContext.DmManualUserFavourites.Any(f => f.DM_ManualID == dm_ManualID && f.UserId == userID))
         {
-            if (!_dbContext.DmManualUserFavourites.Any(f => f.DM_ManualID == dm_ManualID && f.UserId == userID))
+            var nextDM_ManualUserFavouriteID = await _dbContext.NextIdAsync<DmManualUserFavourite>();
+
+            var userFavourite = new DmManualUserFavourite
             {
-                var nextDM_ManualUserFavouriteID = await _dbContext.NextIdAsync<DmManualUserFavourite>();
+                DM_ManualUserFavouriteID = nextDM_ManualUserFavouriteID,
+                Origin = "HQ",
+                VesselID = -1,
+                DM_ManualID = dm_ManualID,
+                UserId = userID,
+                IsDisabled = 0
+            };
+            await _dbContext.DmManualUserFavourites.AddAsync(userFavourite);
 
-                var userFavourite = new DmManualUserFavourite
-                {
-                    DM_ManualUserFavouriteID = nextDM_ManualUserFavouriteID,
-                    Origin = "HQ",
-                    VesselID = -1,
-                    DM_ManualID = dm_ManualID,
-                    UserId = userID,
-                    IsDisabled = 0
-                };
-                await _dbContext.DmManualUserFavourites.AddAsync(userFavourite);
+            await _dbContext.SaveChangesAsync();
 
-                await _dbContext.SaveChangesAsync();
-
-                await _queries.AddNotification(dm_ManualID, -1, "", ManualNotificationType.FAVOURITE, "Manual added as Favourite for user - " + userID, "");
-            }
-        }
-        catch (Exception)
-        {
-            throw;
+            await _queries.AddNotification(dm_ManualID, -1, "", ManualNotificationType.FAVOURITE, "Manual added as Favourite for user - " + userID, "");
         }
     }
 

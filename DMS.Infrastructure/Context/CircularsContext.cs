@@ -30,19 +30,19 @@ public partial class CircularsContext : DbContext
 
     public virtual DbSet<CIR_ToAck_Vsl> CIR_ToAck_Vsl { get; set; } = null!;
 
-    public virtual DbSet<CIR_UserFavourite> CIR_UserFavourite { get; set; }
+    public virtual DbSet<CIR_UserFavourite> CIR_UserFavourite { get; set; } = null!;
 
-    public virtual DbSet<CIR_Settings> CIR_Settings { get; set; }
+    public virtual DbSet<CIR_Settings> CIR_Settings { get; set; } = null!;
 
-    public virtual DbSet<CIR_Notification> CIR_Notification { get; set; }
+    public virtual DbSet<CIR_Notification> CIR_Notification { get; set; } = null!;
 
-    public virtual DbSet<VwCIRMasterBlob> VwCIRMasterBlob { get; set; }
+    public virtual DbSet<VwCIRMasterBlob> VwCIRMasterBlob { get; set; } = null!;
 
-    public virtual DbSet<VwCIRNotification> VwCIRNotification { get; set; }
+    public virtual DbSet<VwCIRNotification> VwCIRNotification { get; set; } = null!;
 
-    public virtual DbSet<VwCIRVesselAck> Vw_CIR_VesselAck { get; set; }
+    public virtual DbSet<VwCIRVesselAck> Vw_CIR_VesselAck { get; set; } = null!;
 
-    public virtual DbSet<CIRMasterList> CIRMasterList { get; set; }
+    public virtual DbSet<CIRMasterList> CIRMasterList { get; set; } = null!;
     
     public virtual DbSet<CirManualLink> CirManualLinks { get; set; } = null!;
 
