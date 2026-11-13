@@ -255,6 +255,72 @@ public class ManualService : IManualService
         return next.Length <= 20 ? next : string.Empty;
     }
 
+    /// <summary>
+    /// The approval steps of the manual's flow (DM_ApprovalAndMailSetup, statuses between Draft and Released, in approval
+    /// order), each marked done / current / pending from the manual's status, with who approved it and when for the
+    /// steps done (DM_ManualApprovedList for this version, not voided by a send back, matched in the order approved).
+    /// </summary>
+    public async Task<ManualApprovalProgressDto> GetApprovalProgressAsync(long dm_ManualID, long dm_ManualVersionID)
+    {
+        var manual = await _dbContext.DmManuals.AsNoTracking()
+            .Where(m => m.DM_ManualID == dm_ManualID)
+            .Select(m => new { m.DmStatusId, m.Approval_FlowID, m.IsApprovalRequired })
+            .FirstOrDefaultAsync();
+        if (manual == null) throw new KeyNotFoundException($"Manual {dm_ManualID} does not exist.");
+
+        var result = new ManualApprovalProgressDto
+        {
+            StatusId = manual.DmStatusId,
+            ApprovalRequired = (manual.IsApprovalRequired ?? 0) == 1 && (manual.Approval_FlowID ?? 0) > 0,
+        };
+        if (!result.ApprovalRequired) return result;
+
+        var flowId = manual.Approval_FlowID!.Value;
+        var setup = await _dbContext.DmApprovalAndMailSetups.AsNoTracking()
+            .Where(s => s.FlowId == flowId && s.DmStatusId > DMStatusConstant.STATUS_DRAFT && s.DmStatusId < DMStatusConstant.STATUS_RELEASE)
+            .Select(s => new { StatusId = s.DmStatusId!.Value, s.ApprovalOrder, s.UserRole, s.HQDept })
+            .ToListAsync();
+        var names = await _dbContext.DmStatuses.AsNoTracking()
+            .Select(s => new { s.DmStatusId, s.StatusName })
+            .ToDictionaryAsync(s => s.DmStatusId, s => s.StatusName);
+        var approvals = await _dbContext.DmManualApprovedLists.AsNoTracking()
+            .Where(a => a.DM_ManualID == dm_ManualID && a.DM_ManualVersionID == dm_ManualVersionID && (a.IsVoid ?? 0) == 0)
+            .OrderBy(a => a.ApprovedDate)
+            .Select(a => new { a.UserName, a.UserId, a.ApprovedDate, a.Comments })
+            .ToListAsync();
+
+        var steps = setup
+            .GroupBy(s => s.StatusId)
+            .Select(g => g.OrderBy(s => s.ApprovalOrder ?? int.MaxValue).First())
+            .OrderBy(s => s.ApprovalOrder ?? int.MaxValue).ThenBy(s => s.StatusId)
+            .ToList();
+        var released = manual.DmStatusId >= DMStatusConstant.STATUS_RELEASE;
+        var currentIndex = steps.FindIndex(s => s.StatusId == manual.DmStatusId);
+
+        for (var i = 0; i < steps.Count; i++)
+        {
+            var s = steps[i];
+            var state = released || (currentIndex >= 0 && i < currentIndex) ? "done" : i == currentIndex ? "current" : "pending";
+            var step = new ManualApprovalStepDto
+            {
+                StatusId = s.StatusId,
+                Name = names.TryGetValue(s.StatusId, out var n) && !string.IsNullOrWhiteSpace(n) ? n.Trim() : $"Step {i + 1}",
+                Role = s.UserRole,
+                Dept = s.HQDept,
+                State = state,
+            };
+            if (state == "done" && i < approvals.Count)
+            {
+                var a = approvals[i];
+                step.ApprovedBy = string.IsNullOrWhiteSpace(a.UserName) ? a.UserId : a.UserName;
+                step.ApprovedOn = a.ApprovedDate;
+                step.Comments = a.Comments;
+            }
+            result.Steps.Add(step);
+        }
+        return result;
+    }
+
     public async Task<List<ManualApprovalFlowListDto>> GetApprovalFlowList()
     {
         var approvalList = await _dbContext.DmApprovalAndMailSetups
@@ -389,7 +455,7 @@ public class ManualService : IManualService
                                on manualVersion.DmStatusId equals status.DmStatusId
                           join categories in _dbContext.DmCategories
                                on manualVersion.DM_CategoryID equals categories.DM_CategoryID
-                          where favourites.UserId == userID
+                          where favourites.UserId == userID && (favourites.IsDisabled ?? 0) == 0
                           select new ManualDetails()
                           {
                               DM_ManualID = manualVersion.DM_ManualID,
@@ -574,7 +640,17 @@ public class ManualService : IManualService
 
     public async Task AddToFavouriteAsync(long dm_ManualID, string userID)
     {
-        if (!_dbContext.DmManualUserFavourites.Any(f => f.DM_ManualID == dm_ManualID && f.UserId == userID))
+        // Added again after being removed: the removed row (IsDisabled = 1) is switched back on instead of adding another.
+        var removed = await _dbContext.DmManualUserFavourites
+            .Where(f => f.DM_ManualID == dm_ManualID && f.UserId == userID)
+            .ToListAsync();
+        if (removed.Any(f => (f.IsDisabled ?? 0) == 0)) return;
+        if (removed.Count > 0)
+        {
+            removed[0].IsDisabled = 0;
+            await _dbContext.SaveChangesAsync();
+            return;
+        }
         {
             var nextDM_ManualUserFavouriteID = await _dbContext.NextIdAsync<DmManualUserFavourite>();
 
@@ -595,16 +671,16 @@ public class ManualService : IManualService
         }
     }
 
+    /// <summary>
+    /// Marks the user's favourite for the manual as removed (IsDisabled = 1); the row is kept. Everything that reads
+    /// favourites leaves out IsDisabled = 1 rows: the list below, and the tree / counts / "Favourites" filter procedures
+    /// through VW_DM_ManualUserFavourite_Active (Database\036_Favourites_ExcludeDisabled.sql).
+    /// </summary>
     public async Task RemoveFromFavouriteAsync(long dm_ManualID, string userID)
     {
-        var favourite = await _dbContext.DmManualUserFavourites
-            .FirstOrDefaultAsync(f => f.DM_ManualID == dm_ManualID && f.UserId == userID && (f.IsDisabled ?? 0) == 0);
-
-        if (favourite == null)
-            return;
-
-        favourite.IsDisabled = 1;
-        await _dbContext.SaveChangesAsync();
+        await _dbContext.DmManualUserFavourites
+            .Where(f => f.DM_ManualID == dm_ManualID && f.UserId == userID && (f.IsDisabled ?? 0) == 0)
+            .ExecuteUpdateAsync(u => u.SetProperty(f => f.IsDisabled, 1));
     }
 
     public async Task<bool> MarkNotificationReadAsync(long notificationID, string userID)

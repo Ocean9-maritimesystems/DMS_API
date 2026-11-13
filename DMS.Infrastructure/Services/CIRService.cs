@@ -419,7 +419,17 @@ public class CIRService : ICIRService
 
     public async Task AddToFavouriteAsync(long cir_MasterID, string circularType, string userID)
     {
-        if (!_dbContext.CIR_UserFavourite.Any(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID))
+        // Added again after being removed: the removed row (IsDisabled = 1) is switched back on instead of adding another.
+        var removed = await _dbContext.CIR_UserFavourite
+            .Where(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID)
+            .ToListAsync();
+        if (removed.Any(f => (f.IsDisabled ?? 0) == 0)) return;
+        if (removed.Count > 0)
+        {
+            removed[0].IsDisabled = 0;
+            await _dbContext.SaveChangesAsync();
+            return;
+        }
         {
             var nextCIR_UserFavouriteID = await _dbContext.NextIdAsync<CIR_UserFavourite>();
 
@@ -438,16 +448,15 @@ public class CIRService : ICIRService
         }
     }
 
+    /// <summary>
+    /// Marks the user's favourite for the circular as removed (IsDisabled = 1); the row is kept. The tree and list
+    /// procedures leave such rows out through VW_CIR_UserFavourite_Active (Database\036_Favourites_ExcludeDisabled.sql).
+    /// </summary>
     public async Task RemoveFromFavouriteAsync(long cir_MasterID, string userID)
     {
-        var favourite = await _dbContext.CIR_UserFavourite
-            .FirstOrDefaultAsync(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID && (f.IsDisabled ?? 0) == 0);
-
-        if (favourite == null)
-            return;
-
-        favourite.IsDisabled = 1;
-        await _dbContext.SaveChangesAsync();
+        await _dbContext.CIR_UserFavourite
+            .Where(f => f.CIR_MasterID == cir_MasterID && f.UserId == userID && (f.IsDisabled ?? 0) == 0)
+            .ExecuteUpdateAsync(u => u.SetProperty(f => f.IsDisabled, 1));
     }
 
     public async Task<long> UpdateCircularAsync(EditCircularDto editDto)

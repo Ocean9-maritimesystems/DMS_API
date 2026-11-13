@@ -169,6 +169,11 @@ public class ManualsController : DmsControllerBase
         return Ok(new { manualCode = code });
     }
 
+    // Manual screen - the approval steps of a manual version: done (by whom, when), the current one, the ones still to come.
+    [HttpGet("GetApprovalProgress")]
+    public async Task<ActionResult<ManualApprovalProgressDto>> GetApprovalProgress(long dm_ManualID, long dm_ManualVersionID)
+        => Ok(await _service.GetApprovalProgressAsync(dm_ManualID, dm_ManualVersionID));
+
     // Add/Edit - Approval Flow list
     [HttpGet("GetApprovalFlowList")]
     public async Task<ActionResult<ManualApprovalFlowListDto>> GetApprovalFlowList()

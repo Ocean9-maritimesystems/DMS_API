@@ -29,6 +29,9 @@ public interface IManualService
 
     public Task<List<ManualApprovalFlowListDto>> GetApprovalFlowList();
 
+    /// <summary>The approval steps of a manual version and how far it has got (done / current / pending).</summary>
+    public Task<ManualApprovalProgressDto> GetApprovalProgressAsync(long dm_ManualID, long dm_ManualVersionID);
+
     public Task<List<ManualApprovalRoleListDto>> GetApprovalDetailsForFlowID(int flowID);
 
     public Task<List<DmManualAttachment>> GetManualAttachmentListAsync(long dm_ManualID);
