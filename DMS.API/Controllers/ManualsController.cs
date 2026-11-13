@@ -161,6 +161,14 @@ public class ManualsController : DmsControllerBase
         return Ok(manualCategory);
     }
 
+    // Add - the next manual code for a category: {CategoryCode}-001, -002, ... (empty when the category has no code)
+    [HttpGet("GetNextManualCode")]
+    public async Task<IActionResult> GetNextManualCode(long categoryId)
+    {
+        var code = await _service.GetNextManualCodeAsync(categoryId);
+        return Ok(new { manualCode = code });
+    }
+
     // Add/Edit - Approval Flow list
     [HttpGet("GetApprovalFlowList")]
     public async Task<ActionResult<ManualApprovalFlowListDto>> GetApprovalFlowList()

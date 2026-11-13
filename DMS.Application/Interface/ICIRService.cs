@@ -17,6 +17,9 @@ public interface ICIRService
     public Task<List<CIRRecentList>> GetRecentCircularsAsync(string circularType, int limit = 10);
     
     public Task<CircularCount_Dashboard> GetDashboardCircularCountsAsync();
+
+    /// <summary>Released circulars and alerts whose "valid until" date is within the next <paramref name="days"/> days, soonest first.</summary>
+    public Task<List<CircularExpiringDto>> GetExpiringSoonAsync(int days, int limit);
     
     public Task<List<CircularsNotificationDto>> GetCIRNotificationListAsync(int limit, string userID);
 

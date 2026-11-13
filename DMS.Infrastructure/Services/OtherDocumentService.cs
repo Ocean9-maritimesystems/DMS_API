@@ -141,35 +141,40 @@ public class OtherDocumentService : IOtherDocumentService
         }
     }
 
+    /// <summary>
+    /// The next document number for a type: {DocumentCode}{n}.0, n being one more than the highest number already used
+    /// for that type. Before, it gave the highest number again (so two documents got the same number), failed when the
+    /// stored numbers began with the code ("ABC3.0" is not a number), and picked the highest by text ("9.0" above "10.0").
+    /// </summary>
     public async Task<string> GetNextDocumentNumberAsync(long typeId)
     {
-        var nextDocumentNumber = "0.0";
-        var maxDocumentNumber = await _dbContext.OtherDocumentMaster
-                             .Where(x => x.OtherDocument_TypeID == typeId)
-                             .OrderByDescending(x => x.DocumentNumber)
-                             .Select(m => m.DocumentNumber)
-                             .FirstOrDefaultAsync();
-        if (maxDocumentNumber != null)
-        {
-            string[] parts = maxDocumentNumber.Split('.');
-            int major = int.Parse(parts[0]) ;
-            nextDocumentNumber = $"{major}.0";
-        }
-        else
-        {
-            nextDocumentNumber = $"1.0";
-        }
-
         var docType = await _dbContext.Set<OtherDocument_Type>()
                         .AsNoTracking()
                         .FirstOrDefaultAsync(t => t.OtherDocument_TypeID == typeId);
-
         if (docType == null) return "";
 
         var prefix = (docType.DocumentCode ?? string.Empty).Trim();
-        nextDocumentNumber = $"{prefix}{nextDocumentNumber}";
+        var numbers = await _dbContext.OtherDocumentMaster
+                            .AsNoTracking()
+                            .Where(x => x.OtherDocument_TypeID == typeId && x.DocumentNumber != null)
+                            .Select(x => x.DocumentNumber)
+                            .ToListAsync();
 
-        return nextDocumentNumber;
+        var max = 0;
+        foreach (var number in numbers)
+        {
+            var rest = number.Trim();
+            if (prefix.Length > 0)
+            {
+                if (!rest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                rest = rest[prefix.Length..].TrimStart();
+            }
+            var digits = new string(rest.TakeWhile(char.IsDigit).ToArray());
+            if (int.TryParse(digits, out var n)) max = Math.Max(max, n);
+        }
+
+        var next = $"{prefix}{max + 1}.0";
+        return next.Length <= 50 ? next : "";
     }
 
     // ================================================================== Folders
@@ -397,6 +402,9 @@ public class OtherDocumentService : IOtherDocumentService
     /// A document added at the office, in a folder or not. Always office only (IsForOfficeOnly = 1): it is never sent to a
     /// vessel. VesselID = the selected vessel (request.VesselId), or -2 when none was chosen.
     /// </summary>
+    /// <summary>Files one new document can have (the New document form allows the same).</summary>
+    public const int MaxFilesPerDocument = 3;
+
     public async Task<(long? Id, string? Error)> CreateDocumentAsync(long? folderId, NewFolderDocument request, OfficeUser user)
     {
         if (folderId != null)
@@ -436,6 +444,7 @@ public class OtherDocumentService : IOtherDocumentService
 
         var maxBytes = await MaxFileBytesAsync();
         var files = request.Files.Where(f => f.Bytes.Length > 0).ToList();
+        if (files.Count > MaxFilesPerDocument) return (null, $"A document can have up to {MaxFilesPerDocument} files.");
         if (files.Any(f => f.Bytes.Length > maxBytes)) return (null, $"Files must be {maxBytes / 1024 / 1024} MB or smaller.");
         var blocked = files.Select(f => FileRules.Problem(f.FileName)).FirstOrDefault(p => p != null);
         if (blocked != null) return (null, blocked);

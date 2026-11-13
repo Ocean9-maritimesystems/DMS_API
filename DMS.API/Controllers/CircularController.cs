@@ -56,6 +56,11 @@ public class CircularController : DmsControllerBase
         return Ok(counts);
     }
 
+    // Dashboard > Overview: released circulars and alerts whose "valid until" date falls in the next {days} days.
+    [HttpGet("GetExpiringSoon")]
+    public async Task<ActionResult<List<CircularExpiringDto>>> GetExpiringSoon(int days = 30, int limit = 8)
+        => Ok(await _service.GetExpiringSoonAsync(Math.Clamp(days, 1, 365), Math.Clamp(limit, 1, 50)));
+
     [HttpGet("GetCircularsNotifications")]
     public async Task<IActionResult> GetCircularsNotifications(int limit = 10)
     {

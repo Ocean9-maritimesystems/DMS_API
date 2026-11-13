@@ -24,6 +24,9 @@ public interface IManualService
 
     public Task<List<ManualCategoryDto>> GetManualCategory();
 
+    /// <summary>The next manual code for a category ({CategoryCode}-001, -002, ...); empty when the category has no code.</summary>
+    public Task<string> GetNextManualCodeAsync(long categoryId);
+
     public Task<List<ManualApprovalFlowListDto>> GetApprovalFlowList();
 
     public Task<List<ManualApprovalRoleListDto>> GetApprovalDetailsForFlowID(int flowID);

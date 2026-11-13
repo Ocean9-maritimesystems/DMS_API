@@ -221,6 +221,40 @@ public class ManualService : IManualService
         return categoryList;
     }
 
+    /// <summary>
+    /// The next manual code for a category, like the circular number: {CategoryCode}-{sequence:000}, one more than the
+    /// highest sequence already used with that prefix (deleted manuals count, so a code is never given out twice).
+    /// Empty when the category has no code or the code would not fit DM_Manual.ManualCode (20 characters).
+    /// </summary>
+    public async Task<string> GetNextManualCodeAsync(long categoryId)
+    {
+        var categoryCode = await _dbContext.DmCategories
+                                   .AsNoTracking()
+                                   .Where(c => c.DM_CategoryID == categoryId)
+                                   .Select(c => c.CategoryCode)
+                                   .FirstOrDefaultAsync();
+        categoryCode = (categoryCode ?? string.Empty).Trim();
+        if (categoryCode.Length == 0) return string.Empty;
+
+        var prefix = $"{categoryCode}-";
+        var codes = await _dbContext.DmManuals
+                            .AsNoTracking()
+                            .Where(m => m.ManualCode != null && m.ManualCode.StartsWith(prefix))
+                            .Select(m => m.ManualCode!)
+                            .ToListAsync();
+
+        var maxSeq = 0;
+        foreach (var code in codes)
+        {
+            var rest = code.Trim();
+            if (!rest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            if (int.TryParse(rest[prefix.Length..], out var seq)) maxSeq = Math.Max(maxSeq, seq);
+        }
+
+        var next = $"{prefix}{maxSeq + 1:D3}";
+        return next.Length <= 20 ? next : string.Empty;
+    }
+
     public async Task<List<ManualApprovalFlowListDto>> GetApprovalFlowList()
     {
         var approvalList = await _dbContext.DmApprovalAndMailSetups

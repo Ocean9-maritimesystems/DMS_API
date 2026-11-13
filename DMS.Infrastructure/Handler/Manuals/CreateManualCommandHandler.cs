@@ -22,6 +22,35 @@ namespace DMS.Data.EF.Handler
             _queries = queries;
         }
 
+        /// <summary>
+        /// The number for a new manual. Top level: one more than the highest first part ("7.0" -> "8.0", "10.0" after "9.0").
+        /// Below a manual: the siblings' prefix with one more than the highest last part ("1.9" -> "1.10" -> "1.11");
+        /// the first one under a manual is its number + ".1" (as before). Deleted siblings count, so no number is used twice.
+        /// </summary>
+        internal static string NextManualNo(IEnumerable<string?> siblingNos, string? parentManualNo, bool topLevel)
+        {
+            var numbers = siblingNos.Select(n => (n ?? string.Empty).Trim()).Where(n => n.Length > 0).ToList();
+            if (topLevel)
+            {
+                var maxMajor = numbers.Select(n => int.TryParse(n.Split('.')[0], out var v) ? v : 0).DefaultIfEmpty(0).Max();
+                return $"{maxMajor + 1}.0";
+            }
+
+            string? prefix = null;
+            var maxLast = 0;
+            foreach (var n in numbers)
+            {
+                var dot = n.LastIndexOf('.');
+                if (dot <= 0 || !int.TryParse(n[(dot + 1)..], out var last)) continue;
+                if (prefix == null || last > maxLast)
+                {
+                    prefix = n[..dot];
+                    maxLast = last;
+                }
+            }
+            return prefix != null ? $"{prefix}.{maxLast + 1}" : $"{(parentManualNo ?? string.Empty).Trim()}.1";
+        }
+
         public async Task<CreateManualResultDto> Handle(CreateManualCommand request, CancellationToken cancellationToken)
         {
             var dmManual = _mapper.Map<DmManual>(request.Manual);
@@ -96,35 +125,17 @@ namespace DMS.Data.EF.Handler
             #endregion
 
             #region Manual No
-            var nextManualNo = "0.0";
-            var maxManualNo = await _dbContext.DmManuals
+            // The highest number is found by comparing the numbers as numbers. It used to sort them as text, where
+            // "1.9" comes after "1.10" and "9.0" after "10.0", so the 11th entry got the 10th entry's number again.
+            var siblingNos = await _dbContext.DmManuals
                                  .Where(x => x.ParentId == parentId)
-                                 .OrderByDescending(x => x.ManualNo)
                                  .Select(m => m.ManualNo)
-                                 .FirstOrDefaultAsync();
-            if (parentId == -1)
-            {
-                if (decimal.TryParse(maxManualNo, out decimal currentVersion))
-                {
-                    nextManualNo = (currentVersion + 1).ToString("0.0");
-                }
-            }
-            else if (maxManualNo != null)
-            {
-                var major = maxManualNo.Substring(0, maxManualNo.LastIndexOf('.'));
-                string[] parts = maxManualNo.Split('.');
-                int minor = int.Parse(parts[parts.Length - 1]) + 1;
-                nextManualNo = $"{major}.{minor.ToString()}";
-            }
-            else
-            {
-                maxManualNo = await _dbContext.DmManuals
-                                    .Where(x => x.DM_ManualID == parentId)
-                                    .OrderByDescending(x => x.ManualNo)
-                                    .Select(m => m.ManualNo)
-                                    .FirstOrDefaultAsync();
-                nextManualNo = $"{maxManualNo}.1";
-            }
+                                 .ToListAsync(cancellationToken);
+            var parentManualNo = parentId == -1 ? null : await _dbContext.DmManuals
+                                 .Where(x => x.DM_ManualID == parentId)
+                                 .Select(m => m.ManualNo)
+                                 .FirstOrDefaultAsync(cancellationToken);
+            var nextManualNo = NextManualNo(siblingNos, parentManualNo, parentId == -1);
             #endregion
 
             #region Manual Level

@@ -198,6 +198,29 @@ public class CIRService : ICIRService
         return counts;
     }
 
+    public async Task<List<CircularExpiringDto>> GetExpiringSoonAsync(int days, int limit)
+    {
+        var today = DateTime.Today;
+        var last = today.AddDays(days);
+        var rows = await _dbContext.CIR_Master.AsNoTracking()
+            .Where(m => (m.IsDeleted ?? 0) == 0 && m.ValidUntil != null && m.ValidUntil >= today && m.ValidUntil <= last
+                     && m.Status != "Temp" && m.Status != "Draft" && m.Status != "Cancelled")
+            .OrderBy(m => m.ValidUntil).ThenBy(m => m.CIR_Number)
+            .Take(limit)
+            .Select(m => new { m.CIR_MasterID, m.CIR_Number, m.Title, m.CircularType, m.ValidUntil })
+            .ToListAsync();
+
+        return rows.Select(m => new CircularExpiringDto
+        {
+            Id = m.CIR_MasterID,
+            Number = m.CIR_Number ?? string.Empty,
+            Title = m.Title,
+            Type = m.CircularType != null && m.CircularType.Trim().StartsWith("alert", StringComparison.OrdinalIgnoreCase) ? "Alert" : "Circular",
+            ValidUntil = m.ValidUntil!.Value.Date,
+            DaysLeft = (int)(m.ValidUntil!.Value.Date - today).TotalDays,
+        }).ToList();
+    }
+
     public async Task<List<CircularsNotificationDto>> GetCIRNotificationListAsync(int limit, string userID)
     {
         var data = await _queries.GetNotificationList(userID, limit);
